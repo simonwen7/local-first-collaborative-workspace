@@ -1,0 +1,33 @@
+{
+  "name": "local-first-collaborative-workspace",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A local-first collaborative document workspace with offline editing, realtime synchronization, and deterministic convergence.",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev -w @lfcw/web",
+    "dev:server": "npm run dev -w @lfcw/server",
+    "build": "npm run build -w @lfcw/crdt && npm run build -w @lfcw/protocol && npm run build -w @lfcw/server && npm run build -w @lfcw/web",
+    "typecheck": "npm run typecheck -w @lfcw/crdt && npm run typecheck -w @lfcw/protocol && npm run typecheck -w @lfcw/server && npm run typecheck -w @lfcw/web",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
+    "eslint": "^10.10.0",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.8",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^5.0.1"
+  }
+}
