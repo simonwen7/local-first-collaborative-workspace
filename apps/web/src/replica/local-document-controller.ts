@@ -1,5 +1,5 @@
 import { TextReplica } from '@lfcw/crdt';
-import type { VisibleElement } from '@lfcw/crdt';
+import type { TextOperation, VisibleElement } from '@lfcw/crdt';
 import { computeLocalTextEdit } from '../editor/text-edit';
 import { LocalWorkspaceDatabase } from '../persistence/database';
 import { LocalDocumentStore } from '../persistence/local-document-store';
@@ -10,6 +10,16 @@ export interface LocalDocumentSnapshot {
   readonly title: string;
   readonly text: string;
   readonly visibleElements: readonly VisibleElement[];
+}
+
+export interface LocalDocumentIdentity {
+  readonly documentId: string;
+  readonly clientId: string;
+}
+
+export interface LocalEditResult {
+  readonly snapshot: LocalDocumentSnapshot;
+  readonly operations: readonly TextOperation[];
 }
 
 export interface LocalDocumentControllerOptions extends LocalDocumentStoreOptions {
@@ -23,6 +33,7 @@ export class LocalDocumentController {
     private readonly store: LocalDocumentStore,
     private readonly replica: TextReplica,
     private readonly documentId: string,
+    private readonly clientId: string,
     private readonly title: string,
   ) {}
 
@@ -59,8 +70,16 @@ export class LocalDocumentController {
       store,
       replica,
       initialized.document.id,
+      initialized.clientMeta.clientId,
       initialized.document.title,
     );
+  }
+
+  getIdentity(): LocalDocumentIdentity {
+    return {
+      documentId: this.documentId,
+      clientId: this.clientId,
+    };
   }
 
   getSnapshot(): LocalDocumentSnapshot {
@@ -72,8 +91,19 @@ export class LocalDocumentController {
     };
   }
 
-  replaceText(nextText: string): Promise<LocalDocumentSnapshot> {
+  replaceText(nextText: string): Promise<LocalEditResult> {
     const result = this.writeQueue.then(() => this.replaceTextNow(nextText));
+
+    this.writeQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    return result;
+  }
+
+  applyRemoteOperations(operations: readonly TextOperation[]): Promise<LocalDocumentSnapshot> {
+    const result = this.writeQueue.then(() => this.applyRemoteOperationsNow(operations));
 
     this.writeQueue = result.then(
       () => undefined,
@@ -87,17 +117,31 @@ export class LocalDocumentController {
     this.store.close();
   }
 
-  private async replaceTextNow(nextText: string): Promise<LocalDocumentSnapshot> {
+  private async replaceTextNow(nextText: string): Promise<LocalEditResult> {
     const edit = computeLocalTextEdit(this.replica.getVisibleElements(), nextText);
 
     if (!edit) {
-      return this.getSnapshot();
+      return {
+        snapshot: this.getSnapshot(),
+        operations: [],
+      };
     }
 
     const operations = await this.store.persistLocalTextEdit(this.documentId, edit);
 
     this.replica.applyAll(operations);
 
+    return {
+      snapshot: this.getSnapshot(),
+      operations,
+    };
+  }
+
+  private async applyRemoteOperationsNow(
+    operations: readonly TextOperation[],
+  ): Promise<LocalDocumentSnapshot> {
+    await this.store.persistRemoteOperations(this.documentId, operations);
+    this.replica.applyAll(operations);
     return this.getSnapshot();
   }
 }

@@ -60,7 +60,15 @@ textarea {
   text-transform: uppercase;
 }
 
-.save-state {
+.status-group {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.save-state,
+.sync-state {
   display: inline-flex;
   align-items: center;
   gap: 9px;
@@ -89,8 +97,21 @@ textarea {
   color: #f0d89e;
 }
 
-.save-state--error {
+.save-state--error,
+.sync-state--error {
   color: #ffb4b4;
+}
+
+.sync-state--online {
+  color: #b7f5cc;
+}
+
+.sync-state--connecting {
+  color: #f0d89e;
+}
+
+.sync-state--offline {
+  color: #d4d4da;
 }
 
 .editor-card {

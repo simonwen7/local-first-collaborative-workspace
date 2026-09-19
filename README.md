@@ -18,18 +18,24 @@ The editor UI is the product surface. The synchronization engine is the primary 
 
 ## Current Status
 
-Milestone 1 — Single-client local-first core implementation.
+Milestone 2 — Online multi-client realtime synchronization.
 
-The browser can now own a local CRDT replica and durable IndexedDB state. Server synchronization and multi-client collaboration remain later milestones.
+The browser remains local-first. A document loads from IndexedDB and local edits continue to save even when the collaboration server is unavailable.
+
+When the server is running, independent browser contexts can join the same logical document (`local-default-document`) over WebSocket. The Fastify server validates operations, appends them to a SQLite operation log, and broadcasts each accepted operation to every joined client, including the sender. The sender echo is the durable acceptance signal.
+
+This is not a production-ready collaboration service.
+
+Current M2 limitation: offline / reconnect replay is not implemented. After a previously online socket disconnects, later local edits stay local and are not automatically uploaded when the server returns.
 
 ## Planned Architecture
 
 - React + Vite browser application
 - IndexedDB + Dexie local persistence
 - custom RGA-inspired collaborative text CRDT
-- explicit WebSocket synchronization protocol
-- Fastify Node server
-- SQLite server persistence
+- explicit WebSocket synchronization protocol (`@lfcw/protocol`)
+- Fastify Node server with a `/sync` WebSocket endpoint
+- SQLite durable operation log (`apps/server/data/lfcw.sqlite`)
 - Vitest
 - fast-check
 - Playwright
@@ -78,6 +84,10 @@ After installation:
 npm run dev:web
 npm run dev:server
 ```
+
+`npm run dev:server` builds `@lfcw/crdt` and `@lfcw/protocol` first so the Node server does not depend on stale `dist` output. The server listens on `127.0.0.1:3001` by default. The web client connects to `ws://127.0.0.1:3001/sync` unless `VITE_SYNC_URL` is set.
+
+Two isolated browser contexts (for example two Chrome profiles, or one normal window and one incognito window) can edit the same document and converge in realtime while the server is running. Same-origin tabs share one IndexedDB replica and therefore one client identity.
 
 Verification commands:
 

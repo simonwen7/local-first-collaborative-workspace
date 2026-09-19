@@ -1,7 +1,29 @@
-/**
- * Shared wire-protocol package.
- *
- * Message schemas and shared protocol contracts are introduced in later
- * milestones. CRDT semantics must remain owned by @lfcw/crdt.
- */
-export {};
+export {
+  clientMessageSchema,
+  deleteOperationSchema,
+  errorMessageSchema,
+  insertOperationSchema,
+  joinMessageSchema,
+  operationMessageSchema,
+  parseClientMessage,
+  parseServerMessage,
+  sequencedOperationSchema,
+  serverMessageSchema,
+  submitOperationMessageSchema,
+  syncMessageSchema,
+  textOperationSchema,
+} from './schemas.js';
+
+export type {
+  ClientMessage,
+  DeleteOperationWire,
+  ErrorMessage,
+  InsertOperationWire,
+  JoinMessage,
+  OperationMessage,
+  SequencedOperation,
+  ServerMessage,
+  SubmitOperationMessage,
+  SyncMessage,
+  TextOperationWire,
+} from './schemas.js';

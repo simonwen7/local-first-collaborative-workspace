@@ -1,15 +1,13 @@
-import Fastify from 'fastify';
+import { createApp } from './app.js';
 
-const app = Fastify({
-  logger: true,
-});
-
-app.get('/health', async () => ({
-  status: 'ok',
-}));
-
-const port = Number(process.env.PORT ?? 3001);
 const host = process.env.HOST ?? '127.0.0.1';
+const port = Number(process.env.PORT ?? 3001);
+const databasePath = process.env.SQLITE_PATH;
+
+const { app } = await createApp({
+  logger: true,
+  ...(databasePath !== undefined && databasePath.length > 0 ? { databasePath } : {}),
+});
 
 try {
   await app.listen({

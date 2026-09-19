@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "dev:web": "npm run dev -w @lfcw/web",
-    "dev:server": "npm run dev -w @lfcw/server",
+    "dev:server": "npm run build -w @lfcw/crdt && npm run build -w @lfcw/protocol && npm run dev -w @lfcw/server",
     "build": "npm run build -w @lfcw/crdt && npm run build -w @lfcw/protocol && npm run build -w @lfcw/server && npm run build -w @lfcw/web",
     "typecheck": "npm run typecheck -w @lfcw/crdt && npm run typecheck -w @lfcw/protocol && npm run typecheck -w @lfcw/server && npm run typecheck -w @lfcw/web",
     "lint": "eslint .",

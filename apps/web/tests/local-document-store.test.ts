@@ -1,7 +1,7 @@
 import 'fake-indexeddb/auto';
 
 import { describe, expect, it } from 'vitest';
-import { ROOT_ID } from '@lfcw/crdt';
+import { OperationIdentityConflictError, ROOT_ID, createInsertOperation } from '@lfcw/crdt';
 import { LocalWorkspaceDatabase } from '../src/persistence/database';
 import { LocalDocumentStore } from '../src/persistence/local-document-store';
 
@@ -75,6 +75,67 @@ describe('LocalDocumentStore', () => {
     const reloaded = await store.loadOperations(initialized.document.id);
 
     expect(reloaded).toHaveLength(2);
+
+    await database.delete();
+  });
+
+  it('persists remote operations unchanged without consuming the local counter', async () => {
+    const database = new LocalWorkspaceDatabase(uniqueDatabaseName('remote-ops'));
+
+    const store = new LocalDocumentStore(database, {
+      clientIdFactory: () => 'client-local',
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+
+    const initialized = await store.initialize();
+    const remoteOperation = createInsertOperation({
+      clientId: 'client-remote',
+      counter: 4,
+      lamport: 11,
+      afterId: ROOT_ID,
+      value: 'R',
+    });
+
+    await store.persistRemoteOperations(initialized.document.id, [remoteOperation]);
+
+    const stored = await store.loadOperations(initialized.document.id);
+    const metaAfterRemote = await store.readClientMeta();
+
+    expect(stored).toEqual([remoteOperation]);
+    expect(stored[0]?.clientId).toBe('client-remote');
+    expect(stored[0]?.counter).toBe(4);
+    expect(stored[0]?.opId).toBe('client-remote:4');
+    expect(metaAfterRemote.nextCounter).toBe(1);
+    expect(metaAfterRemote.lamportClock).toBe(11);
+
+    await store.persistRemoteOperations(initialized.document.id, [remoteOperation]);
+
+    expect(await store.loadOperations(initialized.document.id)).toHaveLength(1);
+    expect((await store.readClientMeta()).nextCounter).toBe(1);
+
+    await expect(
+      store.persistRemoteOperations(initialized.document.id, [
+        createInsertOperation({
+          clientId: 'client-remote',
+          counter: 4,
+          lamport: 12,
+          afterId: ROOT_ID,
+          value: 'X',
+        }),
+      ]),
+    ).rejects.toBeInstanceOf(OperationIdentityConflictError);
+
+    const localOperations = await store.persistLocalTextEdit(initialized.document.id, {
+      deleteTargetIds: [],
+      insertAfterId: remoteOperation.opId,
+      insertValues: ['L'],
+    });
+
+    expect(localOperations).toHaveLength(1);
+    expect(localOperations[0]?.lamport).toBeGreaterThan(11);
+    expect(localOperations[0]?.clientId).toBe('client-local');
+    expect(localOperations[0]?.counter).toBe(1);
+    expect((await store.readClientMeta()).nextCounter).toBe(2);
 
     await database.delete();
   });

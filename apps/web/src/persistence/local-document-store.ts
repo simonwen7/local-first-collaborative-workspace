@@ -1,4 +1,10 @@
-import { createDeleteOperation, createInsertOperation } from '@lfcw/crdt';
+import {
+  OperationIdentityConflictError,
+  createDeleteOperation,
+  createInsertOperation,
+  operationsEqual,
+  validateOperation,
+} from '@lfcw/crdt';
 import type { TextOperation } from '@lfcw/crdt';
 import type { LocalTextEdit } from '../editor/text-edit';
 import { CLIENT_META_KEY, LocalWorkspaceDatabase } from './database';
@@ -180,6 +186,77 @@ export class LocalDocumentStore {
         });
 
         return operations;
+      },
+    );
+  }
+
+  async persistRemoteOperations(
+    documentId: string,
+    operations: readonly TextOperation[],
+  ): Promise<void> {
+    if (operations.length === 0) {
+      return;
+    }
+
+    await this.database.transaction(
+      'rw',
+      this.database.clientMeta,
+      this.database.documents,
+      this.database.operations,
+      async () => {
+        const clientMeta = await this.database.clientMeta.get(CLIENT_META_KEY);
+
+        if (!clientMeta) {
+          throw new Error('Local client metadata is missing.');
+        }
+
+        const document = await this.database.documents.get(documentId);
+
+        if (!document) {
+          throw new Error(`Document "${documentId}" does not exist.`);
+        }
+
+        let lamportClock = clientMeta.lamportClock;
+        let insertedAny = false;
+        const timestamp = this.now();
+
+        for (const operation of operations) {
+          validateOperation(operation);
+          lamportClock = Math.max(lamportClock, operation.lamport);
+
+          const existing = await this.database.operations.get(operation.opId);
+
+          if (!existing) {
+            const record: OperationRecord = {
+              opId: operation.opId,
+              documentId,
+              operation,
+              createdAt: timestamp,
+            };
+
+            await this.database.operations.add(record);
+            insertedAny = true;
+            continue;
+          }
+
+          if (!operationsEqual(existing.operation, operation)) {
+            throw new OperationIdentityConflictError(operation.opId);
+          }
+        }
+
+        if (lamportClock !== clientMeta.lamportClock) {
+          await this.database.clientMeta.put({
+            ...clientMeta,
+            lamportClock,
+          });
+        }
+
+        if (insertedAny) {
+          await this.database.documents.put({
+            ...document,
+            updatedAt: timestamp,
+          });
+        }
       },
     );
   }

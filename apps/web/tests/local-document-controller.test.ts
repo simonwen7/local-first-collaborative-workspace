@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto';
 
 import { describe, expect, it } from 'vitest';
+import { ROOT_ID, createInsertOperation } from '@lfcw/crdt';
 import { LocalDocumentController } from '../src/replica/local-document-controller';
 import { LocalWorkspaceDatabase } from '../src/persistence/database';
 
@@ -18,7 +19,9 @@ describe('LocalDocumentController', () => {
       now: () => '2026-01-01T00:00:00.000Z',
     });
 
-    await first.replaceText('协作👨‍👩‍👧‍👦');
+    const firstEdit = await first.replaceText('协作👨‍👩‍👧‍👦');
+    expect(firstEdit.snapshot.text).toBe('协作👨‍👩‍👧‍👦');
+    expect(firstEdit.operations.length).toBeGreaterThan(0);
     expect(first.getSnapshot().text).toBe('协作👨‍👩‍👧‍👦');
 
     first.close();
@@ -89,6 +92,45 @@ describe('LocalDocumentController', () => {
     await controller.replaceText('AC');
 
     expect(controller.getSnapshot().text).toBe('AC');
+
+    controller.close();
+
+    const cleanupDatabase = new LocalWorkspaceDatabase(databaseName);
+
+    await cleanupDatabase.delete();
+  });
+
+  it('applies remote operations through the same write queue and preserves identity', async () => {
+    const databaseName = uniqueDatabaseName('remote-ingest');
+
+    const controller = await LocalDocumentController.create({
+      databaseName,
+      clientIdFactory: () => 'client-local',
+    });
+
+    expect(controller.getIdentity()).toEqual({
+      documentId: 'local-default-document',
+      clientId: 'client-local',
+    });
+
+    const remoteOperation = createInsertOperation({
+      clientId: 'client-remote',
+      counter: 1,
+      lamport: 20,
+      afterId: ROOT_ID,
+      value: 'R',
+    });
+
+    const remoteSnapshot = await controller.applyRemoteOperations([remoteOperation]);
+
+    expect(remoteSnapshot.text).toBe('R');
+
+    const localEdit = await controller.replaceText('RL');
+
+    expect(localEdit.snapshot.text).toBe('RL');
+    expect(localEdit.operations).toHaveLength(1);
+    expect(localEdit.operations[0]?.lamport).toBeGreaterThan(20);
+    expect(localEdit.operations[0]?.clientId).toBe('client-local');
 
     controller.close();
 

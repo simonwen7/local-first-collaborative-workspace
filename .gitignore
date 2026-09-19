@@ -11,4 +11,6 @@ test-results/
 
 *.sqlite
 *.sqlite3
+*.sqlite-shm
+*.sqlite-wal
 apps/server/data/
