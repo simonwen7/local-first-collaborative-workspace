@@ -18,9 +18,9 @@ The editor UI is the product surface. The synchronization engine is the primary 
 
 ## Current Status
 
-Milestone 0 — Architecture and repository foundation.
+Milestone 1 — Single-client local-first core implementation.
 
-Collaborative editing functionality has not yet been implemented.
+The browser can now own a local CRDT replica and durable IndexedDB state. Server synchronization and multi-client collaboration remain later milestones.
 
 ## Planned Architecture
 

@@ -1,8 +1,33 @@
-/**
- * Pure, runtime-neutral collaborative text CRDT package.
- *
- * The implementation is intentionally introduced in a later milestone.
- * This package must remain independent from React, browser APIs,
- * persistence, networking, and server sequencing.
- */
-export {};
+export {
+  InvalidOperationError,
+  OperationDependencyCycleError,
+  OperationIdentityConflictError,
+} from './errors.js';
+
+export {
+  createDeleteOperation,
+  createInsertOperation,
+  makeOperationId,
+  operationsEqual,
+  validateOperation,
+} from './operation.js';
+
+export { TextReplica } from './replica.js';
+
+export { ROOT_ID } from './types.js';
+
+export type {
+  AnchorId,
+  ApplyResult,
+  ApplyStatus,
+  ClientId,
+  DeleteOperation,
+  ElementId,
+  InsertOperation,
+  OperationId,
+  RootId,
+  TextOperation,
+  VisibleElement,
+} from './types.js';
+
+export type { DeleteOperationInput, InsertOperationInput } from './operation.js';
