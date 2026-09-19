@@ -2,11 +2,11 @@
 
 ## Status
 
-Implemented through Milestone 6. Message shapes are unchanged from Milestone 3; string fields now have documented maximum lengths.
+Current protocol for realtime sync, reconnect catch-up, and optional snapshot bootstrap. Join `capabilities` and `sync.snapshotBootstrap` are optional fields. String fields have documented maximum lengths.
 
 ## Principle
 
-Reconnect synchronization is operation based, with an optional snapshot bootstrap for explicitly capable, cursor-0, pristine clients.
+Reconnect synchronization is operation based. Snapshot bootstrap is an optimization for explicitly capable, cursor-0, pristine clients.
 
 The server never resolves collaboration by replacing the client document with a whole-document last-write-wins value. Server snapshots are a derived cache of a CRDT prefix. Complete SQLite operation history is retained.
 
@@ -23,14 +23,20 @@ Server:
 - `operation` — one sequenced live operation; this is also the durable acceptance signal
 - `error` — protocol, validation, identity-conflict, or `sync-cursor-ahead`
 
-There is no separate ACK message. There is no protocol version field besides the optional capability string `snapshot-bootstrap-v1`. M7 clients omit capabilities and must receive full/incremental operation history. An M8 client still accepts operations-only `sync`.
+There is no separate ACK message. There is no protocol version field besides the optional capability string `snapshot-bootstrap-v1`. Clients that omit capabilities receive full/incremental operation history. A snapshot-capable client still accepts operations-only `sync`.
+
+## Snapshot eligibility
+
+The browser advertises `snapshot-bootstrap-v1` only when the opened document is locally pristine: `lastServerSeq == 0`, no `serverBaselines` row, no local operations, and no outbox.
+
+The server sends a snapshot plus suffix only to those joins, and only when the document has at least 1000 operations. Any client with `lastServerSeq > 0` receives ordinary incremental history (`server_seq > cursor` through the barrier), even if `cursor` is behind a cached snapshot. Behind-client snapshot rebase is not implemented.
+
+If snapshot build or install fails, the client falls back to full-history sync.
 
 ## Reconnect Flow
 
-The implemented flow is:
-
 connect
-→ join with persisted `lastServerSeq`
+→ join with persisted `lastServerSeq` (and optional capabilities)
 → receive one `sync` batch through a fixed barrier
 → persist and apply that batch, advancing the cursor atomically
 → flush the durable outbox
@@ -76,7 +82,7 @@ The client persists per-document `lastServerSeq`, starting at 0.
 
 The cursor advances only inside the server-ingest IndexedDB transaction, to `max(current, confirmedThroughServerSeq)`, and never backwards.
 
-If `lastServerSeq` is greater than the server's current document barrier, the server sends `sync-cursor-ahead` and does not join the socket. M3 does not auto-repair a reset server history.
+If `lastServerSeq` is greater than the server's current document barrier, the server sends `sync-cursor-ahead` and does not join the socket. The protocol does not auto-repair a reset server history.
 
 ## Interrupted Pull
 
@@ -94,7 +100,7 @@ The UI shows Sync Online only when:
 
 ## Protocol string limits
 
-Wire message shapes are unchanged. `@lfcw/protocol` now rejects oversized strings:
+`@lfcw/protocol` rejects oversized strings:
 
 - `documentId` max 64 (`local-default-document` and UUID ids remain valid)
 - `clientId` max 128
@@ -102,7 +108,7 @@ Wire message shapes are unchanged. `@lfcw/protocol` now rejects oversized string
 - element ids (`afterId` / `targetId`) max 256
 - insert `value` max 16384
 
-Integer semantics are unchanged. There are no new charset restrictions beyond existing semantic validation.
+Integer semantics are unchanged. There are no extra charset restrictions beyond existing semantic validation.
 
 ## Transport boundaries
 

@@ -1,204 +1,201 @@
 # Local-First Collaborative Document Workspace
 
-A local-first collaborative document product designed to support realtime and offline editing across independent clients.
+An offline-capable collaborative plain-text workspace built around independent browser replicas, a custom CRDT, IndexedDB durability, and an explicit WebSocket/SQLite sync protocol.
 
-## Project Goal
+[![CI](https://github.com/simonwen7/local-first-collaborative-workspace/actions/workflows/ci.yml/badge.svg)](https://github.com/simonwen7/local-first-collaborative-workspace/actions/workflows/ci.yml)
 
-The project is built around a difficult collaboration scenario:
+![Workspace overview with sidebar, Design Notes title, Share Link, Local Saved, and Sync Online](docs/assets/workspace-overview.png)
 
-1. Alice and Bob edit the same document.
-2. Alice disconnects.
-3. Alice continues editing locally.
-4. Bob continues editing independently.
-5. Alice reconnects.
-6. Missing operations are exchanged.
-7. Both replicas converge without replacing the entire document through last-write-wins.
+This is a local-first engineering project, not a hosted SaaS and not a Google Docs clone. The editor is the product surface. The synchronization engine is the core.
 
-The editor UI is the product surface. The synchronization engine is the primary engineering core.
+## Highlights
 
-## Current Status
+- Custom grapheme-aware plain-text CRDT with deterministic convergence
+- Local-first IndexedDB persistence: edits survive refresh without the server
+- Durable offline outbox, reconnect backoff, and incremental catch-up
+- Realtime WebSocket collaboration with SQLite sequencing and idempotent retries
+- Multi-document workspace with shareable document URLs
+- Fresh-client server snapshot bootstrap (derived cache; full server history retained)
+- Single-node operational hardening plus a zero-retry Chromium reliability gate
 
-Milestone 8 — Server snapshot bootstrap for eligible fresh clients, with full server history retained.
+## Architecture
 
-This is a production-hardened **single-node** deployment. It is not a production-ready SaaS, is not horizontally scalable, and is not authenticated.
+```mermaid
+flowchart TB
+  subgraph browser [Browser]
+    UI[React workspace]
+    Ctrl[Local document controller]
+    CRDT[TextReplica CRDT]
+    IDB[IndexedDB]
+    Sync[Document sync client]
+    UI --> Ctrl
+    Ctrl --> CRDT
+    Ctrl --> IDB
+    Ctrl --> Sync
+  end
 
-The browser remains local-first. The workspace lists locally known documents, creates new UUID documents, and opens a document from `/?document=<documentId>`. Titles and rename are local-only metadata. There is no document deletion.
+  subgraph server [Single-node Fastify]
+    WS[WebSocket /sync]
+    Store[Operation store]
+    Log[(SQLite operation log)]
+    Snap[Derived snapshot cache]
+    WS --> Store
+    Store --> Log
+    Store -.-> Snap
+  end
 
-Only one document session is active at a time. Switching closes the current sync socket and controller before opening the next. An inactive document’s durable outbox stays on disk and is flushed only when that document is opened again.
-
-A valid unknown UUID opens as an empty local document and joins the server normally. The server still cannot distinguish a valid empty document from a never-created id. Sharing is unauthenticated: anyone with the document id or link can join that document.
-
-Local operations are written atomically to the operation log and a durable outbox. Each document persists a `lastServerSeq` cursor meaning: every server operation for this document with `server_seq <= lastServerSeq` has been durably processed.
-
-When the socket drops, the client automatically reconnects on a deterministic schedule (250ms, 500ms, 1s, 2s, then 4s). Reconnect joins with the persisted cursor, incrementally downloads missing SQLite history through a fixed barrier, then uploads remaining outbox operations. Sender echoes and reconnect replay both acknowledge outbox rows. Page reload does not lose unsent local operations.
-
-Local cold-start can restore a complete `TextReplica` checkpoint from IndexedDB, then still reapply the full canonical operation log. Checkpoints accelerate reconstruction. They do not replace the operation log, delete historical rows, or garbage-collect tombstones. A missing, stale, or corrupt checkpoint falls back to full replay. The common sequential-insert replay path no longer walks every ancestor chain to `ROOT`.
-
-Documents that installed a **server baseline snapshot** reconstruct from that authoritative baseline plus local/server suffix rows instead. That baseline is not an M4 cache. Baseline documents currently skip M4 local checkpoints. Prefix operations with `server_seq <= snapshotSeq` are intentionally not stored in the browser operations table.
-
-The Fastify server still uses a global SQLite `server_seq` AUTOINCREMENT log. Gaps from other documents are not treated as missing operations for this document. SQLite schema versioning uses `PRAGMA user_version` (currently 2). `server_snapshots` is a derived cache of `TextReplicaSnapshotV1` at a fixed document barrier. **Complete operation history remains in `operations`.** Snapshots are not compaction, do not delete rows, and do not garbage-collect tombstones. A snapshot can be rebuilt from the operation log. Snapshot JSON remains O(history); outbound bootstrap payloads can still be large. Chunking/backpressure is unsolved.
-
-Eligible clients advertise `snapshot-bootstrap-v1` only when `lastServerSeq == 0` and the opened document is locally pristine (no baseline, operations, or outbox). The server sends snapshot + post-snapshot suffix only to those clients, and only when document history has at least 1000 operations. M7 / non-capable clients and any client with `lastServerSeq > 0` receive ordinary full/incremental operation history. If snapshot build or install fails, the client falls back to full-history sync. SQLite journal mode is unchanged (library default rollback journal; WAL is not enabled).
-
-The server now validates runtime configuration at startup, bounds inbound WebSocket frames and protocol string sizes, optionally allowlists browser Origins, heartbeats idle sockets, exposes `/ready` and process-local `/metrics`, logs structured WebSocket lifecycle events, and shuts down on SIGINT/SIGTERM. Docker Compose runs exactly one server replica with a named `/data` volume. GitHub Actions runs format/lint/typecheck/test/build on Node 24.13.0, then a Chromium Playwright reliability gate.
-
-This is not a production-ready collaboration service.
-
-Remaining limitations:
-
-- unauthenticated collaboration
-- anyone who can reach the server and knows a document id can join
-- single server process only; no horizontal scaling
-- metrics are process-local and reset on restart
-- no rate limiting
-- no full outbound sync chunking/backpressure system
-- snapshot and full-history `sync` payloads can still be huge
-- no automated backup
-- Chromium-only Playwright gate; not Firefox/WebKit and not every manual disaster scenario
-- same-origin normal tabs still share one local replica and client identity
-- no service-worker / PWA offline shell
-- no destructive operation compaction or tombstone garbage collection
-- no snapshot rebase for behind / non-empty clients
-- no server-side document registry
-- no collaborative titles, document deletion, authentication, or presence
-- empty and never-created server documents are indistinguishable
-- a server history reset that leaves a client cursor ahead of SQLite requires intervention (`sync-cursor-ahead`)
-
-## Planned Architecture
-
-- React + Vite browser application
-- IndexedDB + Dexie local persistence (v4: operations, outbox, syncState, replicaSnapshots, serverBaselines)
-- custom RGA-inspired collaborative text CRDT
-- explicit WebSocket synchronization protocol (`@lfcw/protocol`)
-- Fastify Node server with a `/sync` WebSocket endpoint
-- SQLite durable operation log (`apps/server/data/lfcw.sqlite`)
-- Vitest
-- fast-check
-- Playwright
-
-The core demo is designed to run completely locally with no paid infrastructure or hosted collaboration service.
-
-## Repository Structure
-
-```text
-apps/
-  web/        Browser product
-  server/     Local synchronization server
-
-packages/
-  crdt/       Pure collaborative text engine
-  protocol/   Shared wire contracts
-
-e2e/          Chromium Playwright reliability gate
-
-docs/
-  architecture/
-  decisions/
+  Sync <--> WS
 ```
 
-## Architecture Documentation
+The SQLite operation log is the canonical server history. The snapshot cache is derived and regenerable. It does not replace, compact, or delete operations.
 
-- `docs/architecture/system-overview.md`
-- `docs/architecture/crdt-design.md`
-- `docs/architecture/sync-protocol.md`
-- `docs/architecture/persistence-model.md`
-- `docs/architecture/testing-strategy.md`
-- `docs/architecture/deployment.md`
+### Local durability before the network
 
-Architecture Decision Records are located in `docs/decisions/`.
+```mermaid
+sequenceDiagram
+  participant User
+  participant Browser
+  participant IndexedDB
+  participant Server
 
-## Runtime
+  User->>Browser: edit text
+  Browser->>IndexedDB: persist operation and outbox
+  IndexedDB-->>Browser: durable write
+  Browser-->>User: Local Saved
+  Browser->>Server: submit when online
+  Server->>Server: persist sequenced operation
+  Server-->>Browser: sender echo
+  Browser->>IndexedDB: acknowledge outbox
+```
 
-Use Node.js 24.13.0 (see `.nvmrc`). The root `engines` field remains `>=24 <25`.
+### Fresh-client snapshot bootstrap
 
-The repository intentionally rejects Node 25 through the root engine constraint.
+Fresh capable browsers can install a server-derived CRDT baseline plus the post-snapshot operation suffix instead of materializing every historical operation row in IndexedDB.
 
-## Development
+```mermaid
+sequenceDiagram
+  participant Client as Fresh capable browser
+  participant Server
 
-Dependencies are managed using npm workspaces.
+  Client->>Server: join at cursor 0 with snapshot capability
+  Server-->>Client: baseline snapshot S plus suffix through L
+  Note over Server: Full server operation history is still retained
+  Client->>Client: atomically persist baseline and suffix
+  Client->>Client: cursor advances to L
+```
 
-After installation:
+This is not compaction. Server snapshots remain O(history), are not used for behind or non-empty clients, and do not garbage-collect tombstones.
+
+## 90-second demo
+
+Use **two independent browser profiles** (or one normal window and one incognito window). Two ordinary same-origin tabs share IndexedDB and therefore **one client identity** — that is not a two-replica demo.
+
+1. Start the server and web app (see [Quick start](#quick-start)).
+2. In browser A, create a document and type.
+3. Use **Share Link** and open the URL in browser B.
+4. Confirm both editors converge in realtime.
+5. Stop the server.
+6. Keep typing in A: **Local: Saved** stays true while **Sync** disconnects.
+7. Reload A while the server is still down. The offline text remains.
+8. Restart the server.
+9. A reconnects, flushes the outbox, and B catches up.
+
+## Quick start
+
+Requires **Node 24.13.0** and npm (`engines`: `>=24 <25`).
 
 ```bash
-npm run dev:web
+npm ci
+```
+
+Terminal 1:
+
+```bash
 npm run dev:server
 ```
 
-`npm run dev:server` builds `@lfcw/crdt` and `@lfcw/protocol` first so the Node server does not depend on stale `dist` output. The server listens on `127.0.0.1:3001` by default. The web client connects to `ws://127.0.0.1:3001/sync` unless `VITE_SYNC_URL` is set.
-
-Two isolated browser contexts (for example two Chrome profiles, or one normal window and one incognito window) can edit the same document and converge in realtime while the server is running. Same-origin tabs share one IndexedDB replica and therefore one client identity.
-
-Verification commands:
+Terminal 2:
 
 ```bash
-npm run build
-npm run typecheck
-npm run lint
-npm run format:check
+npm run dev:web
+```
+
+Open the printed Vite URL (typically `http://127.0.0.1:5173`). The web app connects to `ws://127.0.0.1:3001/sync` unless `VITE_SYNC_URL` is set.
+
+```bash
 npm test
-```
-
-## Browser E2E
-
-A small Chromium Playwright reliability gate lives in `e2e/`. It is **not** a full manual-acceptance clone and does not cover Firefox or WebKit.
-
-First time:
-
-```bash
 npm run test:e2e:install
-```
-
-Then:
-
-```bash
 npm run test:e2e
 ```
 
-`npm test` remains Vitest-only and does not need Chromium.
+`npm test` is Vitest only. Playwright needs Chromium installed once via `test:e2e:install`. Do not start `dev:web` / `dev:server` before `test:e2e`; that suite owns ports `4177` and `3011`.
 
-Playwright:
+## Reliability
 
-- builds the production Vite app with `VITE_SYNC_URL=ws://127.0.0.1:3011/sync`
-- serves it with `vite preview` on `127.0.0.1:4177` (`--strictPort`)
-- starts a compiled Fastify process on `127.0.0.1:3011` with a unique temporary SQLite file per test
+Automated evidence currently:
 
-Do not start `dev:web` / `dev:server` first. If 4177 or 3011 is already taken, the run fails instead of attaching to a stale process.
+- **Vitest:** 20 files, 151 tests, 0 skipped
+- **Playwright:** 6 specs, 7 Chromium tests, `workers = 1`, `retries = 0`
 
-Collaborators use **separate browser contexts**. Workers = 1, retries = 0. Failures keep a Playwright trace and screenshot (`playwright-report/`, `test-results/`).
+Representative coverage:
 
-GitHub Actions runs this gate in an `e2e` job **after** the core `check` job.
+- CRDT convergence and property tests
+- SQLite duplicate and identity-conflict persistence
+- Offline reload plus reconnect outbox flush
+- Inactive-document outbox
+- IME document-switch regression
+- Graceful WebSocket shutdown
+- SQLite schema migration
+- 1100-operation snapshot-bootstrap browser regression (no fabricated prefix rows)
 
-## Production / single-node deployment
+This is not complete test coverage, not formal verification, and not a Firefox/WebKit matrix.
 
-Supported topology: **one stateful Fastify process** and **one persistent SQLite file**. Persistent SQLite is mandatory. The web app can be deployed as static files. The server requires long-lived WebSockets. Multi-instance deployment is not supported.
-
-See `docs/architecture/deployment.md` for the operational runbook. Summary:
-
-- `HOST` defaults to `127.0.0.1`. Docker/compose must set `HOST=0.0.0.0`.
-- `PORT` defaults to `3001`. `SQLITE_PATH` defaults to `apps/server/data/lfcw.sqlite`.
-- `LOG_LEVEL` defaults to `info`. `WS_MAX_PAYLOAD_BYTES` defaults to `262144` (inbound frames only; outbound `sync` history is not bounded).
-- `WS_ALLOWED_ORIGINS` is empty by default (Origin filtering disabled). Set comma-separated exact origins such as `https://workspace.example.com` to allowlist browser Origins. This is not authentication.
-- `WS_HEARTBEAT_INTERVAL_MS` defaults to `30000`. `SHUTDOWN_TIMEOUT_MS` defaults to `10000`.
-- `GET /health` is liveness (`200 { "status": "ok" }`). `GET /ready` checks SQLite (`200` ready / `503` not_ready). `GET /metrics` is process-local Prometheus text and resets on restart.
-- Operation contents, document text, and full sync payloads are not logged.
-- HTTPS pages must use WSS. TLS terminates outside this Node process.
-- If `VITE_SYNC_URL` is set at web build time, it must be `ws:` or `wss:`. If it is absent in a production build, the client uses `wss://<current-host>/sync` on HTTPS (same-origin; reverse-proxy `/sync` to Fastify). For split hosting:
-
-  ```bash
-  VITE_SYNC_URL=wss://sync.example.com/sync npm run build -w @lfcw/web
-  ```
-
-  Output: `apps/web/dist`.
+## Production-shaped running
 
 ```bash
-docker build -t lfcw-server .
-docker compose up --build
+npm run build
 ```
 
-Compose publishes `3001:3001`, mounts named volume `lfcw-data` at `/data`, sets `SQLITE_PATH=/data/lfcw.sqlite`, and health-checks `/ready`.
+- Static web output: `apps/web/dist`
+- Compiled server: `apps/server/dist`
 
-The SQLite file is canonical server history. Loss of that file is serious. Back up with the server stopped or with SQLite-aware tooling; do not blindly copy a live database as a guaranteed safe backup. Clients cannot automatically rebuild a lost server. There is no automated backup subsystem.
+**Docker Compose starts the Fastify server only.** It does not serve the web UI. Host `apps/web/dist` separately and point the browser at the server with `VITE_SYNC_URL` or same-origin `/sync`.
 
-CI (`.github/workflows/ci.yml`) runs `format:check`, `lint`, `typecheck`, `test`, and `build` on Node 24.13.0, then a Chromium Playwright job. It does not publish images.
+See [deployment](docs/architecture/deployment.md) for environment variables, `/health` `/ready` `/metrics`, backups, and TLS/WSS assumptions.
 
-Do not claim unsupported performance, scalability, or reliability numbers before they have been measured.
+## Repository structure
+
+```text
+apps/web          React workspace, IndexedDB replica, sync client
+apps/server       Fastify WebSocket server and SQLite operation log
+packages/crdt     Runtime-neutral collaborative text engine
+packages/protocol Shared join/sync/operation validation
+e2e               Chromium Playwright reliability gate
+docs/architecture Current-state design and operations notes
+```
+
+## Limitations
+
+- Collaboration is unauthenticated. Knowing a document id is enough to join a reachable server.
+- One backend process and one SQLite database. No horizontal scaling.
+- No rate limiting.
+- Same-origin tabs share browser identity and local state.
+- Server history is retained. Snapshot bootstrap is not compaction.
+- The operator is responsible for SQLite backup. Clients cannot rebuild a lost server.
+
+More operational detail: [deployment](docs/architecture/deployment.md) and [sync protocol](docs/architecture/sync-protocol.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).
+
+## Deep dive
+
+- [System overview](docs/architecture/system-overview.md)
+- [CRDT design](docs/architecture/crdt-design.md)
+- [Persistence model](docs/architecture/persistence-model.md)
+- [Sync protocol](docs/architecture/sync-protocol.md)
+- [Testing strategy](docs/architecture/testing-strategy.md)
+- [Deployment](docs/architecture/deployment.md)
+- [CHANGELOG](CHANGELOG.md)
+- [Architecture Decision Records](docs/decisions/)

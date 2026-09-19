@@ -4,6 +4,8 @@
 
 Accepted.
 
+Current v1 implementation remains plain-text and does not include comments, version history, or presence. The original decision text below is preserved as historical context.
+
 ## Context
 
 Rich-text collaboration introduces marks, nested node structures, selection mapping, formatting conflicts, and substantially more complex CRDT semantics.

@@ -2,19 +2,19 @@
 
 ## Status
 
-Accepted Milestone 0 design. The CRDT is implemented in later milestones.
+Implemented. `TextReplica` in `@lfcw/crdt` is the collaborative text engine used by the browser replica and the server snapshot builder.
 
 ## Model
 
-The collaborative text engine is a custom, operation-based, RGA-inspired sequence CRDT.
+The engine is a custom, operation-based, RGA-inspired sequence CRDT.
 
-The initial document model is plain text / paragraph text rather than a rich-text tree.
+The document model is plain text / paragraph text rather than a rich-text tree.
 
 ## Atomic Text Unit
 
 The logical text unit is a Unicode grapheme cluster, not a UTF-16 code unit.
 
-Editor code will later translate browser input and IME composition into complete grapheme-level operations.
+The editor translates browser input and IME composition into complete grapheme-level operations before they are persisted.
 
 ## Root
 
@@ -40,7 +40,7 @@ Each locally generated operation carries:
 
 Concurrent siblings use the same deterministic comparator on every replica.
 
-The initial ordering rule is:
+The ordering rule is:
 
 1. Lamport clock descending
 2. client ID ascending
@@ -95,11 +95,13 @@ Therefore they materialize the same visible document.
 
 Arrival order is not part of this result.
 
-## Client Checkpoints
+## Snapshots
 
 A fully resolved replica can export a version-1 `TextReplica` snapshot: every node including tombstones, plus historical delete operations. Insert operations are reconstructed from node fields. `childrenByParent` and pending maps are not serialized. Unresolved replicas cannot be snapshotted.
 
 `fromSnapshot` rebuilds nodes, `knownOperations`, and child order directly. Sibling groups use the existing comparator. Parent-cycle validation is an O(n)-style iterative walk.
+
+The same snapshot shape is used for local IndexedDB checkpoints (`replicaSnapshots`) and for the server-derived bootstrap cache. Those two uses have different trust models; see [persistence-model.md](persistence-model.md).
 
 ## Sequential Replay
 
@@ -107,7 +109,7 @@ Cycle detection walks pending/missing-anchor chains only. An insert whose anchor
 
 ## Scope Boundaries
 
-Level 2 does not require:
+This design does not include:
 
 - aggressive tombstone garbage collection
 - rich-text CRDT semantics

@@ -2,7 +2,7 @@
 
 ## Status
 
-Milestone 6 documents a **production-hardened single-node deployment**. It is not a horizontally scalable SaaS architecture and is not access-controlled.
+This is a **production-hardened single-node deployment**. It is not a horizontally scalable SaaS architecture and is not access-controlled. Docker Compose runs the Fastify server only; the static web app is hosted separately.
 
 ## Supported architecture
 
@@ -27,11 +27,11 @@ Default local-development path: `apps/server/data/lfcw.sqlite` (resolved from th
 
 Container path: `/data/lfcw.sqlite` on a named volume mounted at `/data`.
 
-Milestone 8 adds `PRAGMA user_version` migrations that run before listen. Version 1 is the existing `operations` table/index. Version 2 adds `server_snapshots`. Existing M7 databases (`user_version = 0`) upgrade in place without rewriting or deleting operations. The snapshots table starts empty. A binary that sees a newer `user_version` than it supports fails startup instead of downgrading.
+`PRAGMA user_version` migrations run before listen. Version 1 is the existing `operations` table/index. Version 2 adds `server_snapshots`. Existing databases with `user_version = 0` upgrade in place without rewriting or deleting operations. The snapshots table starts empty. A binary that sees a newer `user_version` than it supports fails startup instead of downgrading.
 
-Reverting to an M7 binary leaves the extra `server_snapshots` table unused. Because M8 does not delete operations, that rollback remains data-safe. Do not assume the same after any future destructive compaction.
+An older binary that does not know `server_snapshots` leaves that extra table unused. Because operations are not deleted, that rollback remains data-safe. Do not assume the same after any future destructive compaction.
 
-SQLite currently uses the library default rollback journal. Milestone 6 does **not** enable WAL and does **not** change `synchronous` PRAGMAs. That is an intentional single-process choice.
+SQLite uses the library default rollback journal. WAL is not enabled, and `synchronous` PRAGMAs are not changed. That is an intentional single-process choice. Server snapshots do not replace backups or canonical history.
 
 ## Backup
 
@@ -119,7 +119,7 @@ If `VITE_SYNC_URL` is absent:
 - Vite **dev**: `ws://127.0.0.1:3001/sync`
 - production browser build: same-origin `${ws|wss}://${window.location.host}/sync` (`http:` → `ws:`, `https:` → `wss:`)
 
-Same-origin production mode assumes a reverse proxy routes `/sync` to Fastify. Milestone 6 does not ship a reverse-proxy configuration.
+Same-origin production mode assumes a reverse proxy routes `/sync` to Fastify. This repository does not ship a reverse-proxy configuration. TLS terminates outside this Node process.
 
 Split static-web + sync-server hosting continues to use the `VITE_SYNC_URL` build-time override.
 
@@ -140,7 +140,7 @@ docker compose up --build
 
 Compose binds `3001:3001`, sets `HOST=0.0.0.0`, stores SQLite at `/data/lfcw.sqlite`, mounts named volume `lfcw-data` at `/data`, and health-checks `GET /ready`.
 
-The container does not run Vite preview as a production web server.
+The container does not serve the web UI. Build and host `apps/web/dist` separately.
 
 ## Graceful shutdown
 

@@ -1,7 +1,13 @@
 {
   "name": "local-first-collaborative-workspace",
-  "version": "0.0.0",
+  "version": "1.0.0",
   "private": true,
+  "license": "MIT",
+  "author": "Simon Wen",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/simonwen7/local-first-collaborative-workspace.git"
+  },
   "description": "A local-first collaborative document workspace with offline editing, realtime synchronization, and deterministic convergence.",
   "engines": {
     "node": ">=24 <25"
