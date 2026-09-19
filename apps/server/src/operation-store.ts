@@ -124,7 +124,15 @@ export class OperationStore {
     return row.latest ?? 0;
   }
 
+  checkReady(): void {
+    this.db.prepare('SELECT 1 AS ok').get();
+  }
+
   close(): void {
+    if (!this.db.open) {
+      return;
+    }
+
     this.db.close();
   }
 }

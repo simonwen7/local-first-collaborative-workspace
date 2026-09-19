@@ -1,20 +1,65 @@
+import { parseServerConfig } from './config.js';
 import { createApp } from './app.js';
+import { createGracefulShutdown } from './shutdown.js';
 
-const host = process.env.HOST ?? '127.0.0.1';
-const port = Number(process.env.PORT ?? 3001);
-const databasePath = process.env.SQLITE_PATH;
+let config;
+
+try {
+  config = parseServerConfig();
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`startup_failed: ${message}\n`);
+  process.exit(1);
+}
 
 const { app } = await createApp({
-  logger: true,
-  ...(databasePath !== undefined && databasePath.length > 0 ? { databasePath } : {}),
+  logger: { level: config.logLevel },
+  config,
+  databasePath: config.sqlitePath,
 });
+
+const lifecycle = {
+  host: config.host,
+  port: config.port,
+  sqlitePath: config.sqlitePath,
+};
+
+app.log.info(lifecycle, 'server_starting');
 
 try {
   await app.listen({
-    port,
-    host,
+    port: config.port,
+    host: config.host,
   });
+  app.log.info(lifecycle, 'server_listening');
 } catch (error) {
-  app.log.error(error);
+  app.log.error({ err: error, ...lifecycle }, 'startup_failed');
   process.exit(1);
 }
+
+const graceful = createGracefulShutdown({
+  close: () => app.close(),
+  timeoutMs: config.shutdownTimeoutMs,
+  logger: {
+    info(fields, message) {
+      app.log.info(fields, message);
+    },
+    error(fields, message) {
+      app.log.error(fields, message);
+    },
+  },
+  exit: (code) => {
+    process.exit(code);
+  },
+});
+
+const onSignal = (signal: string): void => {
+  void graceful.shutdown(signal);
+};
+
+process.on('SIGINT', () => {
+  onSignal('SIGINT');
+});
+process.on('SIGTERM', () => {
+  onSignal('SIGTERM');
+});

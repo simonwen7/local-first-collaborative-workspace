@@ -1,4 +1,9 @@
 export {
+  MAX_CLIENT_ID_LENGTH,
+  MAX_DOCUMENT_ID_LENGTH,
+  MAX_ELEMENT_ID_LENGTH,
+  MAX_OPERATION_ID_LENGTH,
+  MAX_OPERATION_VALUE_LENGTH,
   clientMessageSchema,
   deleteOperationSchema,
   errorMessageSchema,

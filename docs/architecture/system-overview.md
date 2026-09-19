@@ -37,6 +37,9 @@ The system is divided into four primary boundaries:
    - WebSocket synchronization coordinator.
    - Durable SQLite operation storage.
    - Realtime relay.
+   - Single-node operational endpoints: `/health`, `/ready`, `/metrics`.
+
+The supported production topology is one Fastify process per SQLite database. The server is not horizontally scalable.
 
 ## Local-First Principle
 

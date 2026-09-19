@@ -1,5 +1,13 @@
 import { z } from 'zod';
 
+export const MAX_DOCUMENT_ID_LENGTH = 64;
+export const MAX_CLIENT_ID_LENGTH = 128;
+export const MAX_OPERATION_ID_LENGTH = 256;
+export const MAX_ELEMENT_ID_LENGTH = 256;
+export const MAX_OPERATION_VALUE_LENGTH = 16384;
+
+const boundedString = (max: number) => z.string().min(1).max(max);
+
 const positiveSafeInteger = z
   .number()
   .int()
@@ -18,21 +26,21 @@ const nonNegativeSafeInteger = z
 
 export const insertOperationSchema = z.object({
   kind: z.literal('insert'),
-  opId: z.string(),
-  clientId: z.string(),
+  opId: boundedString(MAX_OPERATION_ID_LENGTH),
+  clientId: boundedString(MAX_CLIENT_ID_LENGTH),
   counter: positiveSafeInteger,
   lamport: positiveSafeInteger,
-  afterId: z.string(),
-  value: z.string().min(1),
+  afterId: boundedString(MAX_ELEMENT_ID_LENGTH),
+  value: boundedString(MAX_OPERATION_VALUE_LENGTH),
 });
 
 export const deleteOperationSchema = z.object({
   kind: z.literal('delete'),
-  opId: z.string(),
-  clientId: z.string(),
+  opId: boundedString(MAX_OPERATION_ID_LENGTH),
+  clientId: boundedString(MAX_CLIENT_ID_LENGTH),
   counter: positiveSafeInteger,
   lamport: positiveSafeInteger,
-  targetId: z.string(),
+  targetId: boundedString(MAX_ELEMENT_ID_LENGTH),
 });
 
 export const textOperationSchema = z.discriminatedUnion('kind', [
@@ -42,14 +50,14 @@ export const textOperationSchema = z.discriminatedUnion('kind', [
 
 export const joinMessageSchema = z.object({
   type: z.literal('join'),
-  documentId: z.string().min(1),
-  clientId: z.string().min(1),
+  documentId: boundedString(MAX_DOCUMENT_ID_LENGTH),
+  clientId: boundedString(MAX_CLIENT_ID_LENGTH),
   lastServerSeq: nonNegativeSafeInteger,
 });
 
 export const submitOperationMessageSchema = z.object({
   type: z.literal('submit-operation'),
-  documentId: z.string().min(1),
+  documentId: boundedString(MAX_DOCUMENT_ID_LENGTH),
   operation: textOperationSchema,
 });
 
@@ -65,14 +73,14 @@ export const sequencedOperationSchema = z.object({
 
 export const syncMessageSchema = z.object({
   type: z.literal('sync'),
-  documentId: z.string().min(1),
+  documentId: boundedString(MAX_DOCUMENT_ID_LENGTH),
   operations: z.array(sequencedOperationSchema),
   latestServerSeq: nonNegativeSafeInteger,
 });
 
 export const operationMessageSchema = z.object({
   type: z.literal('operation'),
-  documentId: z.string().min(1),
+  documentId: boundedString(MAX_DOCUMENT_ID_LENGTH),
   serverSeq: positiveSafeInteger,
   operation: textOperationSchema,
 });

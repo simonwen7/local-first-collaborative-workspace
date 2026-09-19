@@ -1,8 +1,9 @@
 import type { TextOperation } from '@lfcw/crdt';
 import type { SequencedOperation } from '@lfcw/protocol';
 import { parseServerMessage } from '@lfcw/protocol';
+import { DEFAULT_DEV_SYNC_URL, resolveSyncUrl } from './sync-url';
 
-export const DEFAULT_SYNC_URL = 'ws://127.0.0.1:3001/sync';
+export const DEFAULT_SYNC_URL = DEFAULT_DEV_SYNC_URL;
 
 export const RECONNECT_DELAYS_MS = [250, 500, 1000, 2000, 4000] as const;
 
@@ -302,14 +303,4 @@ export class DocumentSyncClient {
     this.status = status;
     this.onStatusChange?.(status);
   }
-}
-
-function resolveSyncUrl(): string {
-  const configured = import.meta.env.VITE_SYNC_URL;
-
-  if (typeof configured === 'string' && configured.length > 0) {
-    return configured;
-  }
-
-  return DEFAULT_SYNC_URL;
 }

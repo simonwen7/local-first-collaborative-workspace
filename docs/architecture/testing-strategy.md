@@ -15,6 +15,8 @@ Relevant static checks, automated tests, and manual acceptance scenarios must al
 - ESLint
 - formatting
 
+GitHub Actions (`.github/workflows/ci.yml`) runs `npm ci`, `format:check`, `lint`, `typecheck`, `test`, and `build` on Node 24.13.0 for push and pull_request. CI does not mutate files with `npm run format`, does not publish Docker images, and does not run browser E2E.
+
 ### CRDT Unit Tests
 
 The CRDT package will test deterministic behaviors independently of React, WebSocket, IndexedDB, and SQLite.
@@ -53,6 +55,8 @@ Client/server tests cover:
 ### Multi-Client E2E
 
 Playwright will use genuinely independent browser contexts with separate client identity, IndexedDB, and connectivity state.
+
+Milestone 6 CI does **not** run Playwright. Browser acceptance is not automated on every push. Playwright remains installed for a later milestone.
 
 ### Reliability Testing
 

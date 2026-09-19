@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented through Milestone 3.
+Implemented through Milestone 6. Message shapes are unchanged from Milestone 3; string fields now have documented maximum lengths.
 
 ## Principle
 
@@ -91,3 +91,25 @@ The UI shows Sync Online only when:
 - catch-up for the current socket has completed
 - the durable outbox is empty
 - the socket is still open
+
+## Protocol string limits
+
+Wire message shapes are unchanged. `@lfcw/protocol` now rejects oversized strings:
+
+- `documentId` max 64 (`local-default-document` and UUID ids remain valid)
+- `clientId` max 128
+- `opId` max 256
+- element ids (`afterId` / `targetId`) max 256
+- insert `value` max 16384
+
+Integer semantics are unchanged. There are no new charset restrictions beyond existing semantic validation.
+
+## Transport boundaries
+
+Inbound WebSocket frames are bounded by `WS_MAX_PAYLOAD_BYTES` (default 262144). This does **not** bound outbound `sync` history: a fresh client still receives the full server operation list for that document.
+
+Optional `WS_ALLOWED_ORIGINS` can reject browser upgrades whose `Origin` does not exactly match. Empty allowlist disables filtering. Missing `Origin` remains allowed for non-browser clients. Origin allowlisting is not authentication.
+
+The server heartbeats with WebSocket ping/pong and terminates sockets that miss an interval. Clients already reconnect; the server does not.
+
+`connectionId` exists only in server logs.

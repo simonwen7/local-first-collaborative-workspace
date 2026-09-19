@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { parseClientMessage, parseServerMessage, textOperationSchema } from '../src/index.js';
+import {
+  MAX_CLIENT_ID_LENGTH,
+  MAX_DOCUMENT_ID_LENGTH,
+  MAX_ELEMENT_ID_LENGTH,
+  MAX_OPERATION_ID_LENGTH,
+  MAX_OPERATION_VALUE_LENGTH,
+  parseClientMessage,
+  parseServerMessage,
+  textOperationSchema,
+} from '../src/index.js';
 
 const validInsert = {
   kind: 'insert',
@@ -158,6 +167,133 @@ describe('parseClientMessage', () => {
         },
       }),
     ).toThrow();
+  });
+
+  it('accepts string fields at their documented max length and rejects max + 1', () => {
+    const documentId = 'd'.repeat(MAX_DOCUMENT_ID_LENGTH);
+    const clientId = 'c'.repeat(MAX_CLIENT_ID_LENGTH);
+    const opId = 'o'.repeat(MAX_OPERATION_ID_LENGTH);
+    const afterId = 'e'.repeat(MAX_ELEMENT_ID_LENGTH);
+    const value = 'v'.repeat(MAX_OPERATION_VALUE_LENGTH);
+
+    expect(
+      parseClientMessage({
+        type: 'join',
+        documentId,
+        clientId,
+        lastServerSeq: 0,
+      }),
+    ).toMatchObject({ documentId, clientId });
+
+    expect(
+      parseClientMessage({
+        type: 'submit-operation',
+        documentId,
+        operation: {
+          ...validInsert,
+          opId,
+          clientId,
+          afterId,
+          value,
+        },
+      }),
+    ).toMatchObject({
+      operation: { opId, clientId, afterId, value },
+    });
+
+    expect(
+      parseClientMessage({
+        type: 'submit-operation',
+        documentId,
+        operation: {
+          kind: 'delete',
+          opId,
+          clientId,
+          counter: 2,
+          lamport: 2,
+          targetId: afterId,
+        },
+      }),
+    ).toMatchObject({
+      operation: { targetId: afterId },
+    });
+
+    expect(() =>
+      parseClientMessage({
+        type: 'join',
+        documentId: `${documentId}x`,
+        clientId,
+        lastServerSeq: 0,
+      }),
+    ).toThrow();
+
+    expect(() =>
+      parseClientMessage({
+        type: 'join',
+        documentId,
+        clientId: `${clientId}x`,
+        lastServerSeq: 0,
+      }),
+    ).toThrow();
+
+    expect(() =>
+      parseClientMessage({
+        type: 'submit-operation',
+        documentId,
+        operation: { ...validInsert, opId: `${opId}x` },
+      }),
+    ).toThrow();
+
+    expect(() =>
+      parseClientMessage({
+        type: 'submit-operation',
+        documentId,
+        operation: { ...validInsert, afterId: `${afterId}x` },
+      }),
+    ).toThrow();
+
+    expect(() =>
+      parseClientMessage({
+        type: 'submit-operation',
+        documentId,
+        operation: { ...validInsert, value: `${value}x` },
+      }),
+    ).toThrow();
+
+    expect(() =>
+      parseClientMessage({
+        type: 'submit-operation',
+        documentId,
+        operation: {
+          kind: 'delete',
+          opId: validDelete.opId,
+          clientId: validDelete.clientId,
+          counter: 2,
+          lamport: 2,
+          targetId: `${afterId}x`,
+        },
+      }),
+    ).toThrow();
+  });
+
+  it('still accepts local-default-document and UUID document ids', () => {
+    expect(
+      parseClientMessage({
+        type: 'join',
+        documentId: 'local-default-document',
+        clientId: '11111111-2222-4333-8444-555555555555',
+        lastServerSeq: 0,
+      }).documentId,
+    ).toBe('local-default-document');
+
+    expect(
+      parseClientMessage({
+        type: 'join',
+        documentId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+        clientId: 'client-a',
+        lastServerSeq: 0,
+      }).documentId,
+    ).toBe('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
   });
 });
 

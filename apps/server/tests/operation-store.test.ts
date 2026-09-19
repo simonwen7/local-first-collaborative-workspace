@@ -120,6 +120,17 @@ describe('OperationStore', () => {
     expect(store.loadOperations('doc-a')).toHaveLength(1);
   });
 
+  it('proves the SQLite connection is usable without mutating operations', () => {
+    const store = new OperationStore(':memory:');
+    stores.push(store);
+
+    expect(() => store.checkReady()).not.toThrow();
+    expect(store.loadOperations('doc-a')).toEqual([]);
+    store.appendOperation('doc-a', firstInsert);
+    expect(() => store.checkReady()).not.toThrow();
+    expect(store.loadOperations('doc-a')).toHaveLength(1);
+  });
+
   it('survives reopening a file-backed SQLite database', () => {
     const directory = mkdtempSync(path.join(tmpdir(), 'lfcw-store-'));
     const databasePath = path.join(directory, 'lfcw.sqlite');

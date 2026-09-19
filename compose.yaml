@@ -1,0 +1,31 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - '3001:3001'
+    environment:
+      HOST: '0.0.0.0'
+      PORT: '3001'
+      SQLITE_PATH: /data/lfcw.sqlite
+      # Optional browser Origin allowlist. Comma-separated exact origins.
+      # Leave unset to disable Origin filtering.
+      # WS_ALLOWED_ORIGINS: https://workspace.example.com
+    volumes:
+      - lfcw-data:/data
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3001/ready').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+volumes:
+  lfcw-data:

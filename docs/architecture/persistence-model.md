@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented through Milestone 5 for the local-first operation log, local workspace document catalog, outbox, per-document sync cursor, and client CRDT checkpoint cache.
+Implemented through Milestone 6 for the local-first operation log, local workspace document catalog, outbox, per-document sync cursor, client CRDT checkpoint cache, and single-node SQLite server history.
 
 ## Client Persistence
 
@@ -70,6 +70,12 @@ The central durable structure is an append-style operation log containing concep
 - server-received timestamp metadata
 
 The database enforces durable uniqueness of operation identity.
+
+Milestone 6 does not change the operations schema, does not add tables, does not enable WAL, and does not introduce a migration framework. SQLite uses the library default rollback journal. That is an intentional single-process choice; changing `journal_mode` is left for a later decision.
+
+The SQLite file is the canonical server history. There is no automated backup. For this rollback-journal deployment, take an application-consistent copy while the server is stopped, or use SQLite-aware backup tooling. Do not blindly copy a live database as a guaranteed safe backup. Clients cannot automatically rebuild a lost server.
+
+`GET /ready` may run a non-mutating `SELECT 1` against the live connection. Readiness must not insert or delete operation rows.
 
 ## Document State
 
