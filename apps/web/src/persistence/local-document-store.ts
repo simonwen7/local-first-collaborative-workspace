@@ -6,9 +6,10 @@ import {
   validateOperation,
 } from '@lfcw/crdt';
 import type { TextOperation } from '@lfcw/crdt';
+import type { SequencedOperation } from '@lfcw/protocol';
 import type { LocalTextEdit } from '../editor/text-edit';
 import { CLIENT_META_KEY, LocalWorkspaceDatabase } from './database';
-import type { ClientMetaRecord, DocumentRecord, OperationRecord } from './database';
+import type { ClientMetaRecord, DocumentRecord, OperationRecord, OutboxRecord } from './database';
 
 export const DEFAULT_DOCUMENT_ID = 'local-default-document';
 
@@ -22,6 +23,13 @@ export interface LocalDocumentStoreOptions {
 export interface InitializedLocalDocument {
   readonly clientMeta: ClientMetaRecord;
   readonly document: DocumentRecord;
+}
+
+export class InvalidServerBatchError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidServerBatchError';
+  }
 }
 
 export class LocalDocumentStore {
@@ -52,6 +60,7 @@ export class LocalDocumentStore {
       'rw',
       this.database.clientMeta,
       this.database.documents,
+      this.database.syncState,
       async () => {
         let clientMeta = await this.database.clientMeta.get(CLIENT_META_KEY);
 
@@ -81,6 +90,15 @@ export class LocalDocumentStore {
           await this.database.documents.add(document);
         }
 
+        const syncState = await this.database.syncState.get(document.id);
+
+        if (!syncState) {
+          await this.database.syncState.add({
+            documentId: document.id,
+            lastServerSeq: 0,
+          });
+        }
+
         return {
           clientMeta,
           document,
@@ -95,6 +113,30 @@ export class LocalDocumentStore {
     return records.map((record) => record.operation);
   }
 
+  async loadPendingOperations(documentId: string): Promise<TextOperation[]> {
+    const markers = await this.database.outbox.where('documentId').equals(documentId).toArray();
+    const operations: TextOperation[] = [];
+
+    for (const marker of markers) {
+      const record = await this.database.operations.get(marker.opId);
+
+      if (!record) {
+        throw new Error(
+          `Outbox marker "${marker.opId}" is missing its canonical operation record.`,
+        );
+      }
+
+      operations.push(record.operation);
+    }
+
+    return operations.sort((left, right) => left.counter - right.counter);
+  }
+
+  async getLastServerSeq(documentId: string): Promise<number> {
+    const syncState = await this.database.syncState.get(documentId);
+    return syncState?.lastServerSeq ?? 0;
+  }
+
   async persistLocalTextEdit(documentId: string, edit: LocalTextEdit): Promise<TextOperation[]> {
     if (edit.deleteTargetIds.length === 0 && edit.insertValues.length === 0) {
       return [];
@@ -105,6 +147,7 @@ export class LocalDocumentStore {
       this.database.clientMeta,
       this.database.documents,
       this.database.operations,
+      this.database.outbox,
       async () => {
         const clientMeta = await this.database.clientMeta.get(CLIENT_META_KEY);
 
@@ -164,6 +207,7 @@ export class LocalDocumentStore {
         }
 
         const timestamp = this.now();
+        const outboxCreatedAt = Date.now();
 
         const operationRecords: OperationRecord[] = operations.map((operation) => ({
           opId: operation.opId,
@@ -172,7 +216,14 @@ export class LocalDocumentStore {
           createdAt: timestamp,
         }));
 
+        const outboxRecords: OutboxRecord[] = operations.map((operation) => ({
+          opId: operation.opId,
+          documentId,
+          createdAt: outboxCreatedAt,
+        }));
+
         await this.database.operations.bulkAdd(operationRecords);
+        await this.database.outbox.bulkAdd(outboxRecords);
 
         await this.database.clientMeta.put({
           ...clientMeta,
@@ -190,19 +241,20 @@ export class LocalDocumentStore {
     );
   }
 
-  async persistRemoteOperations(
+  async persistServerOperations(
     documentId: string,
-    operations: readonly TextOperation[],
+    sequencedOperations: readonly SequencedOperation[],
+    confirmedThroughServerSeq: number,
   ): Promise<void> {
-    if (operations.length === 0) {
-      return;
-    }
+    validateServerBatch(sequencedOperations, confirmedThroughServerSeq);
 
     await this.database.transaction(
       'rw',
       this.database.clientMeta,
       this.database.documents,
       this.database.operations,
+      this.database.outbox,
+      this.database.syncState,
       async () => {
         const clientMeta = await this.database.clientMeta.get(CLIENT_META_KEY);
 
@@ -220,7 +272,8 @@ export class LocalDocumentStore {
         let insertedAny = false;
         const timestamp = this.now();
 
-        for (const operation of operations) {
+        for (const item of sequencedOperations) {
+          const operation = item.operation;
           validateOperation(operation);
           lamportClock = Math.max(lamportClock, operation.lamport);
 
@@ -236,11 +289,20 @@ export class LocalDocumentStore {
 
             await this.database.operations.add(record);
             insertedAny = true;
-            continue;
+          } else if (!operationsEqual(existing.operation, operation)) {
+            throw new OperationIdentityConflictError(operation.opId);
           }
 
-          if (!operationsEqual(existing.operation, operation)) {
-            throw new OperationIdentityConflictError(operation.opId);
+          const outboxRow = await this.database.outbox.get(operation.opId);
+
+          if (outboxRow) {
+            const canonical = existing ?? { operation };
+
+            if (!operationsEqual(canonical.operation, operation)) {
+              throw new OperationIdentityConflictError(operation.opId);
+            }
+
+            await this.database.outbox.delete(operation.opId);
           }
         }
 
@@ -257,6 +319,15 @@ export class LocalDocumentStore {
             updatedAt: timestamp,
           });
         }
+
+        const syncState = await this.database.syncState.get(documentId);
+        const currentLastServerSeq = syncState?.lastServerSeq ?? 0;
+        const nextLastServerSeq = Math.max(currentLastServerSeq, confirmedThroughServerSeq);
+
+        await this.database.syncState.put({
+          documentId,
+          lastServerSeq: nextLastServerSeq,
+        });
       },
     );
   }
@@ -273,5 +344,34 @@ export class LocalDocumentStore {
 
   close(): void {
     this.database.close();
+  }
+}
+
+export function validateServerBatch(
+  sequencedOperations: readonly SequencedOperation[],
+  confirmedThroughServerSeq: number,
+): void {
+  if (!Number.isSafeInteger(confirmedThroughServerSeq) || confirmedThroughServerSeq < 0) {
+    throw new InvalidServerBatchError(
+      'confirmedThroughServerSeq must be a non-negative safe integer.',
+    );
+  }
+
+  let previousServerSeq = 0;
+
+  for (const item of sequencedOperations) {
+    if (!Number.isSafeInteger(item.serverSeq) || item.serverSeq < 1) {
+      throw new InvalidServerBatchError('serverSeq must be a positive safe integer.');
+    }
+
+    if (item.serverSeq <= previousServerSeq) {
+      throw new InvalidServerBatchError('serverSeq values must be strictly increasing.');
+    }
+
+    if (item.serverSeq > confirmedThroughServerSeq) {
+      throw new InvalidServerBatchError('serverSeq must not exceed confirmedThroughServerSeq.');
+    }
+
+    previousServerSeq = item.serverSeq;
   }
 }

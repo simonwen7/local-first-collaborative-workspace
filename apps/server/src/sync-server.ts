@@ -99,7 +99,7 @@ export function attachSyncServer(app: FastifyInstance, store: OperationStore): S
           return;
         }
 
-        joinSocket(socket, session, message.documentId, message.clientId);
+        joinSocket(socket, session, message.documentId, message.clientId, message.lastServerSeq);
         return;
       }
 
@@ -137,7 +137,19 @@ export function attachSyncServer(app: FastifyInstance, store: OperationStore): S
     session: SocketSession,
     documentId: string,
     clientId: string,
+    lastServerSeq: number,
   ) => {
+    const currentLatest = store.getLatestServerSeq(documentId);
+
+    if (lastServerSeq > currentLatest) {
+      sendError(
+        socket,
+        'sync-cursor-ahead',
+        'Client lastServerSeq is ahead of server document history.',
+      );
+      return;
+    }
+
     session.documentId = documentId;
     session.clientId = clientId;
 
@@ -150,12 +162,13 @@ export function attachSyncServer(app: FastifyInstance, store: OperationStore): S
 
     room.add(socket);
 
-    const operations = store.loadOperations(documentId);
+    const barrier = store.getLatestServerSeq(documentId);
+    const operations = store.loadOperationsAfter(documentId, lastServerSeq, barrier);
     const syncMessage: SyncMessage = {
       type: 'sync',
       documentId,
       operations,
-      latestServerSeq: store.getLatestServerSeq(documentId),
+      latestServerSeq: barrier,
     };
 
     sendJson(socket, syncMessage);

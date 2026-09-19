@@ -42,7 +42,9 @@ export function App() {
         syncClient = new DocumentSyncClient({
           documentId: identity.documentId,
           clientId: identity.clientId,
-          onRemoteOperations: async (operations) => {
+          getLastServerSeq: () => createdController.getLastServerSeq(),
+          loadPendingOperations: () => createdController.loadPendingOperations(),
+          onServerOperations: async (sequencedOperations, confirmedThroughServerSeq) => {
             const activeController = controllerRef.current;
 
             if (!activeController) {
@@ -57,7 +59,10 @@ export function App() {
               return;
             }
 
-            const remoteSnapshot = await activeController.applyRemoteOperations(operations);
+            const remoteSnapshot = await activeController.applyServerOperations(
+              sequencedOperations,
+              confirmedThroughServerSeq,
+            );
 
             if (disposed) {
               return;
@@ -148,7 +153,7 @@ export function App() {
     <main className="workspace-shell">
       <header className="workspace-header">
         <div>
-          <p className="eyebrow">Milestone 2 · Local-first</p>
+          <p className="eyebrow">Milestone 3 · Local-first</p>
           <h1>{title}</h1>
         </div>
 
@@ -208,7 +213,7 @@ export function App() {
 
         <footer className="editor-footer">
           <span>Offline-capable local persistence</span>
-          <span>Realtime sync is best-effort in M2</span>
+          <span>Reconnect sync is durable and incremental</span>
         </footer>
       </section>
 
@@ -239,6 +244,8 @@ function syncStatusLabel(status: SyncStatus): string {
   switch (status) {
     case 'connecting':
       return 'Sync: Connecting';
+    case 'syncing':
+      return 'Sync: Syncing';
     case 'online':
       return 'Sync: Online';
     case 'offline':

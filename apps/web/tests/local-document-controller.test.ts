@@ -121,9 +121,15 @@ describe('LocalDocumentController', () => {
       value: 'R',
     });
 
-    const remoteSnapshot = await controller.applyRemoteOperations([remoteOperation]);
+    expect(await controller.getLastServerSeq()).toBe(0);
+
+    const remoteSnapshot = await controller.applyServerOperations(
+      [{ serverSeq: 2, operation: remoteOperation }],
+      2,
+    );
 
     expect(remoteSnapshot.text).toBe('R');
+    expect(await controller.getLastServerSeq()).toBe(2);
 
     const localEdit = await controller.replaceText('RL');
 
@@ -131,6 +137,7 @@ describe('LocalDocumentController', () => {
     expect(localEdit.operations).toHaveLength(1);
     expect(localEdit.operations[0]?.lamport).toBeGreaterThan(20);
     expect(localEdit.operations[0]?.clientId).toBe('client-local');
+    expect(await controller.loadPendingOperations()).toEqual(localEdit.operations);
 
     controller.close();
 

@@ -52,6 +52,7 @@ async function joinDocument(
   socket: WebSocket,
   clientId: string,
   joinDocumentId = documentId,
+  lastServerSeq = 0,
 ): Promise<SyncMessage> {
   const sync = waitForMessage<SyncMessage>(socket, (message) => message.type === 'sync');
 
@@ -60,6 +61,7 @@ async function joinDocument(
       type: 'join',
       documentId: joinDocumentId,
       clientId,
+      lastServerSeq,
     }),
   );
 
@@ -291,5 +293,104 @@ describe('collaboration server', () => {
     expect(
       otherMessages.filter((message) => (message as { type?: string }).type === 'operation'),
     ).toEqual([]);
+  });
+
+  it('serves incremental join history, empty catch-up, and cursor-ahead errors', async () => {
+    running = await startServer();
+
+    const clientA = await openClient(running.port);
+    sockets.push(clientA);
+    await joinDocument(clientA, 'client-a', documentId, 0);
+
+    clientA.send(
+      JSON.stringify({
+        type: 'submit-operation',
+        documentId,
+        operation: insertA,
+      }),
+    );
+    const first = await waitForMessage<OperationMessage>(
+      clientA,
+      (message) => message.type === 'operation' && message.operation.opId === insertA.opId,
+    );
+
+    const insertB = createInsertOperation({
+      clientId: 'client-a',
+      counter: 2,
+      lamport: 2,
+      afterId: insertA.opId,
+      value: 'B',
+    });
+    clientA.send(
+      JSON.stringify({
+        type: 'submit-operation',
+        documentId,
+        operation: insertB,
+      }),
+    );
+    const second = await waitForMessage<OperationMessage>(
+      clientA,
+      (message) => message.type === 'operation' && message.operation.opId === insertB.opId,
+    );
+
+    const other = createInsertOperation({
+      clientId: 'other-client',
+      counter: 1,
+      lamport: 1,
+      afterId: ROOT_ID,
+      value: 'Z',
+    });
+    const otherClient = await openClient(running.port);
+    sockets.push(otherClient);
+    await joinDocument(otherClient, 'other-client', 'other-document', 0);
+    otherClient.send(
+      JSON.stringify({
+        type: 'submit-operation',
+        documentId: 'other-document',
+        operation: other,
+      }),
+    );
+    await waitForMessage<OperationMessage>(
+      otherClient,
+      (message) => message.type === 'operation' && message.operation.opId === other.opId,
+    );
+
+    const clientB = await openClient(running.port);
+    sockets.push(clientB);
+    const syncB = await joinDocument(clientB, 'client-b', documentId, 0);
+    expect(syncB.operations.map((item) => item.operation.opId)).toEqual([
+      insertA.opId,
+      insertB.opId,
+    ]);
+    expect(syncB.latestServerSeq).toBe(second.serverSeq);
+
+    const clientC = await openClient(running.port);
+    sockets.push(clientC);
+    const syncC = await joinDocument(clientC, 'client-c', documentId, first.serverSeq);
+    expect(syncC.operations).toEqual([
+      {
+        serverSeq: second.serverSeq,
+        operation: insertB,
+      },
+    ]);
+
+    const clientD = await openClient(running.port);
+    sockets.push(clientD);
+    const syncD = await joinDocument(clientD, 'client-d', documentId, second.serverSeq);
+    expect(syncD.operations).toEqual([]);
+    expect(syncD.latestServerSeq).toBe(second.serverSeq);
+
+    const ahead = await openClient(running.port);
+    sockets.push(ahead);
+    const aheadError = waitForMessage<ErrorMessage>(ahead, (message) => message.type === 'error');
+    ahead.send(
+      JSON.stringify({
+        type: 'join',
+        documentId,
+        clientId: 'client-ahead',
+        lastServerSeq: second.serverSeq + 10,
+      }),
+    );
+    expect((await aheadError).code).toBe('sync-cursor-ahead');
   });
 });

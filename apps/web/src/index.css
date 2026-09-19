@@ -106,7 +106,8 @@ textarea {
   color: #b7f5cc;
 }
 
-.sync-state--connecting {
+.sync-state--connecting,
+.sync-state--syncing {
   color: #f0d89e;
 }
 

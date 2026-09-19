@@ -44,6 +44,7 @@ export const joinMessageSchema = z.object({
   type: z.literal('join'),
   documentId: z.string().min(1),
   clientId: z.string().min(1),
+  lastServerSeq: nonNegativeSafeInteger,
 });
 
 export const submitOperationMessageSchema = z.object({

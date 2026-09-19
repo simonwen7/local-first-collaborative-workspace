@@ -87,14 +87,24 @@ export class OperationStore {
   }
 
   loadOperations(documentId: string): SequencedPersistedOperation[] {
+    return this.loadOperationsAfter(documentId, 0, this.getLatestServerSeq(documentId));
+  }
+
+  loadOperationsAfter(
+    documentId: string,
+    afterServerSeq: number,
+    throughServerSeq: number,
+  ): SequencedPersistedOperation[] {
     const rows = this.db
       .prepare(
         `SELECT server_seq, operation_json
          FROM operations
          WHERE document_id = ?
+           AND server_seq > ?
+           AND server_seq <= ?
          ORDER BY server_seq ASC`,
       )
-      .all(documentId) as OperationRow[];
+      .all(documentId, afterServerSeq, throughServerSeq) as OperationRow[];
 
     return rows.map((row) => ({
       serverSeq: row.server_seq,

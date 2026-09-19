@@ -2,20 +2,23 @@
 
 ## Status
 
-Accepted Milestone 0 persistence design. Database schemas are implemented incrementally.
+Implemented through Milestone 3 for the local-first operation log, outbox, and per-document sync cursor.
 
 ## Client Persistence
 
-The browser uses IndexedDB through Dexie.
+The browser uses IndexedDB through Dexie (`lfcw-local-workspace`, version 2).
 
-The planned logical stores are:
+Current stores:
 
-- client metadata
-- documents
-- operations
-- per-document synchronization state
-- snapshots/checkpoints
-- comments
+- `clientMeta` — stable `clientId`, `nextCounter`, `lamportClock`
+- `documents`
+- `operations` — canonical CRDT operation log (`opId` primary key; no `serverSeq` / ack / origin fields)
+- `outbox` — `{ opId, documentId, createdAt }` markers for unacknowledged local operations
+- `syncState` — `{ documentId, lastServerSeq }`
+
+Snapshots, comments, and a service-worker offline shell are not implemented.
+
+A v1 → v2 upgrade preserves existing rows, initializes `lastServerSeq = 0`, and re-queues locally originated operations into the outbox. Server duplicate handling makes that re-queue safe.
 
 ## Client Identity
 

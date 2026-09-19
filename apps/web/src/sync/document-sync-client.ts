@@ -1,15 +1,23 @@
 import type { TextOperation } from '@lfcw/crdt';
+import type { SequencedOperation } from '@lfcw/protocol';
 import { parseServerMessage } from '@lfcw/protocol';
 
 export const DEFAULT_SYNC_URL = 'ws://127.0.0.1:3001/sync';
 
-export type SyncStatus = 'connecting' | 'online' | 'offline' | 'error';
+export const RECONNECT_DELAYS_MS = [250, 500, 1000, 2000, 4000] as const;
+
+export type SyncStatus = 'offline' | 'connecting' | 'syncing' | 'online' | 'error';
 
 export interface DocumentSyncClientOptions {
   readonly documentId: string;
   readonly clientId: string;
   readonly url?: string;
-  readonly onRemoteOperations: (operations: readonly TextOperation[]) => Promise<void> | void;
+  readonly getLastServerSeq: () => Promise<number> | number;
+  readonly loadPendingOperations: () => Promise<readonly TextOperation[]>;
+  readonly onServerOperations: (
+    sequencedOperations: readonly SequencedOperation[],
+    confirmedThroughServerSeq: number,
+  ) => Promise<void> | void;
   readonly onStatusChange?: (status: SyncStatus) => void;
 }
 
@@ -17,21 +25,26 @@ export class DocumentSyncClient {
   private readonly documentId: string;
   private readonly clientId: string;
   private readonly url: string;
-  private readonly onRemoteOperations: DocumentSyncClientOptions['onRemoteOperations'];
+  private readonly getLastServerSeq: DocumentSyncClientOptions['getLastServerSeq'];
+  private readonly loadPendingOperations: DocumentSyncClientOptions['loadPendingOperations'];
+  private readonly onServerOperations: DocumentSyncClientOptions['onServerOperations'];
   private readonly onStatusChange?: (status: SyncStatus) => void;
 
   private socket: WebSocket | null = null;
   private status: SyncStatus = 'offline';
   private inbound: Promise<void> = Promise.resolve();
-  private startupQueue: TextOperation[] = [];
-  private waitingForInitialSync = false;
   private closedByClient = false;
+  private catchUpComplete = false;
+  private reconnectAttempt = 0;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(options: DocumentSyncClientOptions) {
     this.documentId = options.documentId;
     this.clientId = options.clientId;
     this.url = options.url ?? resolveSyncUrl();
-    this.onRemoteOperations = options.onRemoteOperations;
+    this.getLastServerSeq = options.getLastServerSeq;
+    this.loadPendingOperations = options.loadPendingOperations;
+    this.onServerOperations = options.onServerOperations;
 
     if (options.onStatusChange !== undefined) {
       this.onStatusChange = options.onStatusChange;
@@ -43,12 +56,11 @@ export class DocumentSyncClient {
   }
 
   connect(): void {
-    if (this.socket) {
+    if (this.closedByClient || this.socket) {
       return;
     }
 
-    this.closedByClient = false;
-    this.waitingForInitialSync = false;
+    this.catchUpComplete = false;
     this.setStatus('connecting');
 
     const socket = new WebSocket(this.url);
@@ -59,14 +71,7 @@ export class DocumentSyncClient {
         return;
       }
 
-      this.waitingForInitialSync = true;
-      socket.send(
-        JSON.stringify({
-          type: 'join',
-          documentId: this.documentId,
-          clientId: this.clientId,
-        }),
-      );
+      void this.sendJoin(socket);
     });
 
     socket.addEventListener('message', (event) => {
@@ -91,12 +96,15 @@ export class DocumentSyncClient {
       }
 
       this.socket = null;
-      this.waitingForInitialSync = false;
-      this.startupQueue = [];
+      this.catchUpComplete = false;
 
-      if (!this.closedByClient && this.status !== 'error') {
+      if (this.closedByClient) {
         this.setStatus('offline');
+        return;
       }
+
+      this.setStatus('offline');
+      this.scheduleReconnect();
     });
   }
 
@@ -105,20 +113,18 @@ export class DocumentSyncClient {
       return;
     }
 
-    if (this.status === 'online' && this.socket?.readyState === WebSocket.OPEN) {
-      this.sendOperations(operations);
+    if (!this.catchUpComplete || this.socket?.readyState !== WebSocket.OPEN) {
       return;
     }
 
-    if (this.status === 'connecting' || this.waitingForInitialSync) {
-      this.startupQueue.push(...operations);
-    }
+    this.setStatus('syncing');
+    this.sendOperations(operations);
   }
 
   close(): void {
     this.closedByClient = true;
-    this.waitingForInitialSync = false;
-    this.startupQueue = [];
+    this.catchUpComplete = false;
+    this.cancelReconnect();
 
     const socket = this.socket;
     this.socket = null;
@@ -128,6 +134,23 @@ export class DocumentSyncClient {
     }
 
     this.setStatus('offline');
+  }
+
+  private async sendJoin(socket: WebSocket): Promise<void> {
+    const lastServerSeq = await this.getLastServerSeq();
+
+    if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    socket.send(
+      JSON.stringify({
+        type: 'join',
+        documentId: this.documentId,
+        clientId: this.clientId,
+        lastServerSeq,
+      }),
+    );
   }
 
   private enqueueInbound(work: () => Promise<void>): void {
@@ -169,24 +192,59 @@ export class DocumentSyncClient {
     }
 
     if (message.type === 'sync') {
-      await this.onRemoteOperations(message.operations.map((item) => item.operation));
-      this.waitingForInitialSync = false;
-      this.setStatus('online');
-      this.flushStartupQueue();
+      this.setStatus('syncing');
+      await this.onServerOperations(message.operations, message.latestServerSeq);
+      this.catchUpComplete = true;
+      this.reconnectAttempt = 0;
+      await this.flushOutbox();
+      await this.refreshOnlineStatus();
       return;
     }
 
-    await this.onRemoteOperations([message.operation]);
+    await this.onServerOperations(
+      [
+        {
+          serverSeq: message.serverSeq,
+          operation: message.operation,
+        },
+      ],
+      message.serverSeq,
+    );
+    await this.refreshOnlineStatus();
   }
 
-  private flushStartupQueue(): void {
-    if (this.startupQueue.length === 0) {
+  private async flushOutbox(): Promise<void> {
+    if (!this.catchUpComplete || this.socket?.readyState !== WebSocket.OPEN) {
       return;
     }
 
-    const queued = this.startupQueue;
-    this.startupQueue = [];
-    this.sendOperations(queued);
+    const pending = await this.loadPendingOperations();
+
+    if (pending.length === 0) {
+      return;
+    }
+
+    this.setStatus('syncing');
+    this.sendOperations(pending);
+  }
+
+  private async refreshOnlineStatus(): Promise<void> {
+    if (!this.catchUpComplete || this.closedByClient) {
+      return;
+    }
+
+    if (this.socket?.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    const pending = await this.loadPendingOperations();
+
+    if (pending.length === 0) {
+      this.setStatus('online');
+      return;
+    }
+
+    this.setStatus('syncing');
   }
 
   private sendOperations(operations: readonly TextOperation[]): void {
@@ -205,6 +263,35 @@ export class DocumentSyncClient {
         }),
       );
     }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.closedByClient || this.reconnectTimer !== null || this.socket) {
+      return;
+    }
+
+    const cappedIndex = Math.min(this.reconnectAttempt, RECONNECT_DELAYS_MS.length - 1);
+    const delayMs = RECONNECT_DELAYS_MS[cappedIndex] ?? 4000;
+    this.reconnectAttempt += 1;
+
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+
+      if (this.closedByClient || this.socket) {
+        return;
+      }
+
+      this.connect();
+    }, delayMs);
+  }
+
+  private cancelReconnect(): void {
+    if (this.reconnectTimer === null) {
+      return;
+    }
+
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
   }
 
   private setStatus(status: SyncStatus): void {

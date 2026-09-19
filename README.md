@@ -18,20 +18,30 @@ The editor UI is the product surface. The synchronization engine is the primary 
 
 ## Current Status
 
-Milestone 2 — Online multi-client realtime synchronization.
+Milestone 3 — Durable offline / reconnect synchronization.
 
-The browser remains local-first. A document loads from IndexedDB and local edits continue to save even when the collaboration server is unavailable.
+The browser remains local-first. Documents load from IndexedDB. Local edits continue and are saved even when the collaboration server is unavailable.
 
-When the server is running, independent browser contexts can join the same logical document (`local-default-document`) over WebSocket. The Fastify server validates operations, appends them to a SQLite operation log, and broadcasts each accepted operation to every joined client, including the sender. The sender echo is the durable acceptance signal.
+Local operations are written atomically to the operation log and a durable outbox. Each document persists a `lastServerSeq` cursor meaning: every server operation for this document with `server_seq <= lastServerSeq` has been durably processed.
+
+When the socket drops, the client automatically reconnects on a deterministic schedule (250ms, 500ms, 1s, 2s, then 4s). Reconnect joins with the persisted cursor, incrementally downloads missing SQLite history through a fixed barrier, then uploads remaining outbox operations. Sender echoes and reconnect replay both acknowledge outbox rows. Page reload does not lose unsent local operations.
+
+The Fastify server still uses a global SQLite `server_seq` AUTOINCREMENT log. Gaps from other documents are not treated as missing operations for this document.
 
 This is not a production-ready collaboration service.
 
-Current M2 limitation: offline / reconnect replay is not implemented. After a previously online socket disconnects, later local edits stay local and are not automatically uploaded when the server returns.
+Remaining limitations:
+
+- no service-worker / PWA offline shell
+- no snapshots or compaction
+- no authentication, presence, or rich text
+- a server history reset that leaves a client cursor ahead of SQLite requires intervention (`sync-cursor-ahead`)
+- same-origin normal tabs still share one local replica and client identity
 
 ## Planned Architecture
 
 - React + Vite browser application
-- IndexedDB + Dexie local persistence
+- IndexedDB + Dexie local persistence (v2: operations, outbox, syncState)
 - custom RGA-inspired collaborative text CRDT
 - explicit WebSocket synchronization protocol (`@lfcw/protocol`)
 - Fastify Node server with a `/sync` WebSocket endpoint

@@ -1,5 +1,6 @@
 import { TextReplica } from '@lfcw/crdt';
 import type { TextOperation, VisibleElement } from '@lfcw/crdt';
+import type { SequencedOperation } from '@lfcw/protocol';
 import { computeLocalTextEdit } from '../editor/text-edit';
 import { LocalWorkspaceDatabase } from '../persistence/database';
 import { LocalDocumentStore } from '../persistence/local-document-store';
@@ -82,6 +83,14 @@ export class LocalDocumentController {
     };
   }
 
+  getLastServerSeq(): Promise<number> {
+    return this.store.getLastServerSeq(this.documentId);
+  }
+
+  loadPendingOperations(): Promise<TextOperation[]> {
+    return this.store.loadPendingOperations(this.documentId);
+  }
+
   getSnapshot(): LocalDocumentSnapshot {
     return {
       documentId: this.documentId,
@@ -102,8 +111,13 @@ export class LocalDocumentController {
     return result;
   }
 
-  applyRemoteOperations(operations: readonly TextOperation[]): Promise<LocalDocumentSnapshot> {
-    const result = this.writeQueue.then(() => this.applyRemoteOperationsNow(operations));
+  applyServerOperations(
+    sequencedOperations: readonly SequencedOperation[],
+    confirmedThroughServerSeq: number,
+  ): Promise<LocalDocumentSnapshot> {
+    const result = this.writeQueue.then(() =>
+      this.applyServerOperationsNow(sequencedOperations, confirmedThroughServerSeq),
+    );
 
     this.writeQueue = result.then(
       () => undefined,
@@ -137,11 +151,16 @@ export class LocalDocumentController {
     };
   }
 
-  private async applyRemoteOperationsNow(
-    operations: readonly TextOperation[],
+  private async applyServerOperationsNow(
+    sequencedOperations: readonly SequencedOperation[],
+    confirmedThroughServerSeq: number,
   ): Promise<LocalDocumentSnapshot> {
-    await this.store.persistRemoteOperations(this.documentId, operations);
-    this.replica.applyAll(operations);
+    await this.store.persistServerOperations(
+      this.documentId,
+      sequencedOperations,
+      confirmedThroughServerSeq,
+    );
+    this.replica.applyAll(sequencedOperations.map((item) => item.operation));
     return this.getSnapshot();
   }
 }

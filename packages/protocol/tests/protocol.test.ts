@@ -27,12 +27,48 @@ describe('parseClientMessage', () => {
         type: 'join',
         documentId: 'local-default-document',
         clientId: 'client-a',
+        lastServerSeq: 0,
       }),
     ).toEqual({
       type: 'join',
       documentId: 'local-default-document',
       clientId: 'client-a',
+      lastServerSeq: 0,
     });
+  });
+
+  it('accepts a join message with a positive lastServerSeq', () => {
+    expect(
+      parseClientMessage({
+        type: 'join',
+        documentId: 'local-default-document',
+        clientId: 'client-a',
+        lastServerSeq: 12,
+      }),
+    ).toMatchObject({
+      type: 'join',
+      lastServerSeq: 12,
+    });
+  });
+
+  it('rejects a negative or unsafe lastServerSeq', () => {
+    expect(() =>
+      parseClientMessage({
+        type: 'join',
+        documentId: 'local-default-document',
+        clientId: 'client-a',
+        lastServerSeq: -1,
+      }),
+    ).toThrow();
+
+    expect(() =>
+      parseClientMessage({
+        type: 'join',
+        documentId: 'local-default-document',
+        clientId: 'client-a',
+        lastServerSeq: Number.MAX_SAFE_INTEGER + 1,
+      }),
+    ).toThrow();
   });
 
   it('accepts a valid insert submit-operation message', () => {

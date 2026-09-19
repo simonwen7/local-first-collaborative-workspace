@@ -50,6 +50,40 @@ describe('OperationStore', () => {
     expect(store.getLatestServerSeq('missing')).toBe(0);
   });
 
+  it('loads incremental history with a fixed barrier and ignores other-document gaps', () => {
+    const store = new OperationStore(':memory:');
+    stores.push(store);
+
+    const first = store.appendOperation('doc-a', firstInsert);
+    const other = createInsertOperation({
+      clientId: 'client-other',
+      counter: 1,
+      lamport: 3,
+      afterId: ROOT_ID,
+      value: 'X',
+    });
+    store.appendOperation('doc-b', other);
+    const second = store.appendOperation('doc-a', secondInsert);
+
+    expect(store.loadOperationsAfter('doc-a', 0, second.serverSeq)).toEqual([
+      { serverSeq: first.serverSeq, operation: firstInsert },
+      { serverSeq: second.serverSeq, operation: secondInsert },
+    ]);
+    expect(store.loadOperationsAfter('doc-a', first.serverSeq, second.serverSeq)).toEqual([
+      { serverSeq: second.serverSeq, operation: secondInsert },
+    ]);
+    expect(store.loadOperationsAfter('doc-a', first.serverSeq, first.serverSeq)).toEqual([]);
+    expect(store.loadOperationsAfter('doc-a', second.serverSeq, second.serverSeq)).toEqual([]);
+
+    const onlyFirstBarrier = store.loadOperationsAfter('doc-a', 0, first.serverSeq);
+    expect(onlyFirstBarrier).toEqual([{ serverSeq: first.serverSeq, operation: firstInsert }]);
+    expect(
+      onlyFirstBarrier.every(
+        (row, index, rows) => index === 0 || row.serverSeq > rows[index - 1]!.serverSeq,
+      ),
+    ).toBe(true);
+  });
+
   it('returns the existing sequence for an identical duplicate without inserting again', () => {
     const store = new OperationStore(':memory:');
     stores.push(store);
