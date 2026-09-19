@@ -140,6 +140,42 @@ export function App() {
           clientId: identity.clientId,
           getLastServerSeq: () => controller.getLastServerSeq(),
           loadPendingOperations: () => controller.loadPendingOperations(),
+          isSnapshotBootstrapEligible: () => controller.isSnapshotBootstrapEligible(),
+          onSnapshotBootstrap: async (
+            bootstrap,
+            sequencedOperations,
+            confirmedThroughServerSeq,
+          ) => {
+            if (
+              !transitions.isCurrent(generation) ||
+              sessionRef.current?.controller !== controller
+            ) {
+              return;
+            }
+
+            if (compositionGate.isHolding()) {
+              await compositionGate.waitUntilLocalCommitComplete();
+            }
+
+            if (
+              !transitions.isCurrent(generation) ||
+              sessionRef.current?.controller !== controller
+            ) {
+              return;
+            }
+
+            const remoteSnapshot = await controller.installServerSnapshot(
+              bootstrap,
+              sequencedOperations,
+              confirmedThroughServerSeq,
+            );
+
+            if (!transitions.isCurrent(generation) || unmountedRef.current) {
+              return;
+            }
+
+            setText(remoteSnapshot.text);
+          },
           onServerOperations: async (sequencedOperations, confirmedThroughServerSeq) => {
             if (
               !transitions.isCurrent(generation) ||

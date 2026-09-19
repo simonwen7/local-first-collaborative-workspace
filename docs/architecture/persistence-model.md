@@ -2,11 +2,11 @@
 
 ## Status
 
-Implemented through Milestone 6 for the local-first operation log, local workspace document catalog, outbox, per-document sync cursor, client CRDT checkpoint cache, and single-node SQLite server history.
+Implemented through Milestone 8 for the local-first operation log, local workspace document catalog, outbox, per-document sync cursor, client CRDT checkpoint cache, optional authoritative server baseline, and single-node SQLite server history plus derived snapshot cache.
 
 ## Client Persistence
 
-The browser uses IndexedDB through Dexie (`lfcw-local-workspace`, version 3).
+The browser uses IndexedDB through Dexie (`lfcw-local-workspace`, version 4).
 
 Current stores:
 
@@ -16,8 +16,13 @@ Current stores:
 - `outbox` — `{ opId, documentId, createdAt }` markers for unacknowledged local operations
 - `syncState` — `{ documentId, lastServerSeq }`
 - `replicaSnapshots` — at most one derived `TextReplica` checkpoint per document
+- `serverBaselines` — at most one authoritative server prefix snapshot per document (`&documentId`)
 
-Canonical durable truth remains `operations` + `clientMeta` + `outbox` + `syncState`. `replicaSnapshots` is an acceleration cache. A missing, stale, or corrupt checkpoint must fall back to full operation replay. Checkpoints do not delete operation rows, tombstones, or historical payloads.
+Canonical durable truth for a **full-log** document remains `operations` + `clientMeta` + `outbox` + `syncState`. `replicaSnapshots` is an acceleration cache.
+
+Canonical durable truth for a **snapshot-bootstrapped** document is `serverBaselines` + suffix `operations` + `clientMeta` + `outbox` + `syncState`. Prefix operations with `server_seq <= snapshotSeq` are not materialized locally. `replicaSnapshots` is neither used nor written for those documents.
+
+A v3 → v4 upgrade preserves every existing table and row and adds empty `serverBaselines`. It does not fabricate a baseline from an M4 checkpoint and does not rewrite operations.
 
 A v1 → v2 upgrade preserves existing rows, initializes `lastServerSeq = 0`, and re-queues locally originated operations into the outbox. Server duplicate handling makes that re-queue safe.
 
@@ -69,9 +74,9 @@ The central durable structure is an append-style operation log containing concep
 - client-created timestamp metadata
 - server-received timestamp metadata
 
-The database enforces durable uniqueness of operation identity.
+Milestone 8 introduces `PRAGMA user_version` migrations. Version 1 is the existing operations schema. Version 2 adds `server_snapshots` (`document_id` primary key, `snapshot_seq`, `snapshot_version`, `snapshot_json`, `created_at`). The operations table is unchanged. Snapshot rows are a derived cache of `TextReplica.exportSnapshot()` at a fixed document barrier. If snapshot rows vanished, the complete operation log could regenerate them. M8 does not delete, truncate, or compact operations.
 
-Milestone 6 does not change the operations schema, does not add tables, does not enable WAL, and does not introduce a migration framework. SQLite uses the library default rollback journal. That is an intentional single-process choice; changing `journal_mode` is left for a later decision.
+The database enforces durable uniqueness of operation identity. SQLite uses the library default rollback journal. WAL is not enabled.
 
 The SQLite file is the canonical server history. There is no automated backup. For this rollback-journal deployment, take an application-consistent copy while the server is stopped, or use SQLite-aware backup tooling. Do not blindly copy a live database as a guaranteed safe backup. Clients cannot automatically rebuild a lost server.
 
@@ -89,7 +94,7 @@ Client CRDT checkpoints are performance accelerators only.
 
 A checkpoint stores a version-1 `TextReplica` snapshot plus the known-operation count it represents. It does not store `lastServerSeq`. `syncState` remains the source of truth for the server cursor. A checkpoint may include unacknowledged local operations and may be ahead of or behind `lastServerSeq`.
 
-A snapshot does not replace the operation log as the collaboration truth. The complete canonical operation log is retained in IndexedDB and SQLite. Milestone 4 does not implement destructive operation compaction, tombstone garbage collection, or server-side snapshots.
+A snapshot does not replace the server operation log as the collaboration truth. The complete canonical operation log is retained in SQLite. Milestone 8 does not implement destructive operation compaction, tombstone garbage collection, or history deletion. Client M4 checkpoints still require a full local operation log; documents with an authoritative `serverBaselines` row skip M4 restore and automatic checkpoint creation.
 
 After a trusted checkpoint restore, the controller still reapplies the complete canonical operation log. Operations already represented by the checkpoint become idempotent identity checks. Later suffix operations apply normally. If the checkpoint cannot be trusted, startup discards it in memory and rebuilds only from the canonical log.
 

@@ -13,6 +13,7 @@ That process:
 - serves `GET /health`, `GET /ready`, and `GET /metrics`
 - accepts long-lived WebSockets at `/sync`
 - appends the canonical operation history to SQLite
+- may cache a derived per-document `TextReplica` snapshot for fresh-client bootstrap
 
 The web application is a separately built static artifact (`apps/web/dist`). This Node process does not serve the Vite dev server and does not terminate TLS.
 
@@ -26,13 +27,17 @@ Default local-development path: `apps/server/data/lfcw.sqlite` (resolved from th
 
 Container path: `/data/lfcw.sqlite` on a named volume mounted at `/data`.
 
+Milestone 8 adds `PRAGMA user_version` migrations that run before listen. Version 1 is the existing `operations` table/index. Version 2 adds `server_snapshots`. Existing M7 databases (`user_version = 0`) upgrade in place without rewriting or deleting operations. The snapshots table starts empty. A binary that sees a newer `user_version` than it supports fails startup instead of downgrading.
+
+Reverting to an M7 binary leaves the extra `server_snapshots` table unused. Because M8 does not delete operations, that rollback remains data-safe. Do not assume the same after any future destructive compaction.
+
 SQLite currently uses the library default rollback journal. Milestone 6 does **not** enable WAL and does **not** change `synchronous` PRAGMAs. That is an intentional single-process choice.
 
 ## Backup
 
 There is no automated backup subsystem.
 
-The SQLite file is the canonical server history. For this rollback-journal / single-process deployment:
+The SQLite file is the canonical server history, including the derived `server_snapshots` cache when present. For this rollback-journal / single-process deployment:
 
 - take an application-consistent copy **while the server is stopped**, or
 - use SQLite-aware backup tooling
@@ -73,7 +78,7 @@ Origin policy is **not** authentication or authorization. Direct clients that om
 
 `WS_MAX_PAYLOAD_BYTES` bounds inbound client frames only.
 
-Fresh-client `sync` responses can still be much larger because the server sends full document history. There is no outbound chunking or backpressure subsystem.
+Fresh-client `sync` responses can still be much larger because the server may send full document history or a snapshot whose CRDT payload is still O(history). There is no outbound chunking or backpressure subsystem. Server snapshots do not bound storage or message size.
 
 ## HTTP endpoints
 
@@ -86,6 +91,16 @@ Fresh-client `sync` responses can still be much larger because the server sends 
 `/ready` uses a non-mutating SQLite `SELECT 1` against the live `OperationStore`. Internal SQLite errors are logged server-side and are not returned to the HTTP client.
 
 `/metrics` aggregates only. Names do not include `documentId`, `clientId`, or operation contents. Counters and gauges reset when the process restarts. They are not a cluster-wide view.
+
+Snapshot-related counters:
+
+- `lfcw_snapshot_build_total`
+- `lfcw_snapshot_build_failures_total`
+- `lfcw_snapshot_bootstrap_total`
+- `lfcw_snapshot_bytes_sent_total`
+- `lfcw_snapshot_suffix_operations_sent_total`
+
+These are process-local like the rest of `/metrics`. Snapshot JSON and document text are not logged or labeled.
 
 ## Web static deployment
 
@@ -166,10 +181,10 @@ CI does not run `npm run format` (it must not mutate files) and does not publish
 - metrics are process-local and reset on restart
 - no rate limiting
 - no full outbound sync chunking/backpressure system
-- fresh client receives full server history
-- no server snapshot/compaction
+- snapshot and full-history `sync` payloads can still be huge
 - no automated backup
 - Chromium-only Playwright gate; not Firefox/WebKit and not every manual disaster scenario
 - same-origin tab identity limitation
 - SQLite journal mode is unchanged (not WAL)
 - no authentication, authorization, Redis, or multi-instance room state
+- no compaction, history deletion, or tombstone GC

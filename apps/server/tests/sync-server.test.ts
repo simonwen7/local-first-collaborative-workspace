@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { ROOT_ID, createInsertOperation } from '@lfcw/crdt';
 import type { ErrorMessage, OperationMessage, SyncMessage } from '@lfcw/protocol';
+import { SNAPSHOT_BOOTSTRAP_CAPABILITY } from '@lfcw/protocol';
 import WebSocket from 'ws';
 import { createApp } from '../src/app.js';
 import type { CreatedApp } from '../src/app.js';
+import { SNAPSHOT_OPERATION_THRESHOLD } from '../src/server-snapshot.js';
+import type { OperationStore } from '../src/operation-store.js';
 
 const documentId = 'local-default-document';
 
@@ -53,6 +56,7 @@ async function joinDocument(
   clientId: string,
   joinDocumentId = documentId,
   lastServerSeq = 0,
+  capabilities?: readonly string[],
 ): Promise<SyncMessage> {
   const sync = waitForMessage<SyncMessage>(socket, (message) => message.type === 'sync');
 
@@ -62,6 +66,7 @@ async function joinDocument(
       documentId: joinDocumentId,
       clientId,
       lastServerSeq,
+      ...(capabilities ? { capabilities } : {}),
     }),
   );
 
@@ -393,4 +398,111 @@ describe('collaboration server', () => {
     );
     expect((await aheadError).code).toBe('sync-cursor-ahead');
   });
+
+  it('sends full operation history to an M7-style client even when a snapshot exists', async () => {
+    running = await startServer();
+    seedResolvedHistory(running.created.store, documentId, SNAPSHOT_OPERATION_THRESHOLD);
+
+    const capable = await openClient(running.port);
+    sockets.push(capable);
+    const capableSync = await joinDocument(capable, 'client-capable', documentId, 0, [
+      SNAPSHOT_BOOTSTRAP_CAPABILITY,
+    ]);
+    expect(capableSync.snapshotBootstrap).toBeDefined();
+    expect(capableSync.operations).toEqual([]);
+
+    const legacy = await openClient(running.port);
+    sockets.push(legacy);
+    const legacySync = await joinDocument(legacy, 'client-legacy');
+    expect(legacySync.snapshotBootstrap).toBeUndefined();
+    expect(legacySync.operations).toHaveLength(SNAPSHOT_OPERATION_THRESHOLD);
+  });
+
+  it('sends snapshot plus suffix to a capable cursor-0 client', async () => {
+    running = await startServer();
+    const last = seedResolvedHistory(
+      running.created.store,
+      documentId,
+      SNAPSHOT_OPERATION_THRESHOLD,
+    );
+    const warmup = await openClient(running.port);
+    sockets.push(warmup);
+    await joinDocument(warmup, 'warmup', documentId, 0, [SNAPSHOT_BOOTSTRAP_CAPABILITY]);
+
+    running.created.store.appendOperation(
+      documentId,
+      createInsertOperation({
+        clientId: 'suffix',
+        counter: 1,
+        lamport: SNAPSHOT_OPERATION_THRESHOLD + 1,
+        afterId: last.opId,
+        value: 'z',
+      }),
+    );
+
+    const client = await openClient(running.port);
+    sockets.push(client);
+    const sync = await joinDocument(client, 'client-b', documentId, 0, [
+      SNAPSHOT_BOOTSTRAP_CAPABILITY,
+    ]);
+    expect(sync.snapshotBootstrap?.snapshotSeq).toBe(SNAPSHOT_OPERATION_THRESHOLD);
+    expect(sync.operations).toHaveLength(1);
+    expect(sync.operations[0]?.operation.value).toBe('z');
+    expect(sync.latestServerSeq).toBe(running.created.store.getLatestServerSeq(documentId));
+  });
+
+  it('does not snapshot a capable client when document history is below the threshold', async () => {
+    running = await startServer();
+    seedResolvedHistory(running.created.store, documentId, 3);
+
+    const client = await openClient(running.port);
+    sockets.push(client);
+    const sync = await joinDocument(client, 'client-small', documentId, 0, [
+      SNAPSHOT_BOOTSTRAP_CAPABILITY,
+    ]);
+    expect(sync.snapshotBootstrap).toBeUndefined();
+    expect(sync.operations).toHaveLength(3);
+  });
+
+  it('uses incremental operation catch-up for a capable client with cursor > 0', async () => {
+    running = await startServer();
+    seedResolvedHistory(running.created.store, documentId, SNAPSHOT_OPERATION_THRESHOLD);
+    const warmup = await openClient(running.port);
+    sockets.push(warmup);
+    await joinDocument(warmup, 'warmup', documentId, 0, [SNAPSHOT_BOOTSTRAP_CAPABILITY]);
+
+    const client = await openClient(running.port);
+    sockets.push(client);
+    const sync = await joinDocument(client, 'behind', documentId, 10, [
+      SNAPSHOT_BOOTSTRAP_CAPABILITY,
+    ]);
+    expect(sync.snapshotBootstrap).toBeUndefined();
+    expect(sync.operations.length).toBe(SNAPSHOT_OPERATION_THRESHOLD - 10);
+    expect(sync.operations[0]?.serverSeq).toBe(11);
+  });
 });
+
+function seedResolvedHistory(store: OperationStore, seedDocumentId: string, count: number) {
+  let afterId = ROOT_ID;
+  let last = createInsertOperation({
+    clientId: 'seed',
+    counter: 1,
+    lamport: 1,
+    afterId,
+    value: 'a',
+  });
+
+  for (let counter = 1; counter <= count; counter += 1) {
+    last = createInsertOperation({
+      clientId: 'seed',
+      counter,
+      lamport: counter,
+      afterId,
+      value: 'a',
+    });
+    store.appendOperation(seedDocumentId, last);
+    afterId = last.opId;
+  }
+
+  return last;
+}

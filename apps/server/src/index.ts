@@ -12,11 +12,21 @@ try {
   process.exit(1);
 }
 
-const { app } = await createApp({
-  logger: { level: config.logLevel },
-  config,
-  databasePath: config.sqlitePath,
-});
+let created;
+
+try {
+  created = await createApp({
+    logger: { level: config.logLevel },
+    config,
+    databasePath: config.sqlitePath,
+  });
+} catch (error) {
+  const message = error instanceof Error ? error.message : String(error);
+  process.stderr.write(`startup_failed: ${message}\n`);
+  process.exit(1);
+}
+
+const { app } = created;
 
 const lifecycle = {
   host: config.host,

@@ -15,6 +15,11 @@ export interface ServerMetricSnapshot {
   readonly syncQueryDurationCount: number;
   readonly appendOperationDurationMsTotal: number;
   readonly appendOperationDurationCount: number;
+  readonly snapshotBuildTotal: number;
+  readonly snapshotBuildFailuresTotal: number;
+  readonly snapshotBootstrapTotal: number;
+  readonly snapshotBytesSentTotal: number;
+  readonly snapshotSuffixOperationsSentTotal: number;
 }
 
 export class ServerMetrics {
@@ -34,6 +39,11 @@ export class ServerMetrics {
   private syncQueryDurationCount = 0;
   private appendOperationDurationMsTotal = 0;
   private appendOperationDurationCount = 0;
+  private snapshotBuildTotal = 0;
+  private snapshotBuildFailuresTotal = 0;
+  private snapshotBootstrapTotal = 0;
+  private snapshotBytesSentTotal = 0;
+  private snapshotSuffixOperationsSentTotal = 0;
 
   recordConnectionOpened(): void {
     this.wsConnections += 1;
@@ -88,6 +98,20 @@ export class ServerMetrics {
     this.appendOperationDurationMsTotal += durationMs;
   }
 
+  recordSnapshotBuild(): void {
+    this.snapshotBuildTotal += 1;
+  }
+
+  recordSnapshotBuildFailure(): void {
+    this.snapshotBuildFailuresTotal += 1;
+  }
+
+  recordSnapshotBootstrap(snapshotBytes: number, suffixOperationCount: number): void {
+    this.snapshotBootstrapTotal += 1;
+    this.snapshotBytesSentTotal += snapshotBytes;
+    this.snapshotSuffixOperationsSentTotal += suffixOperationCount;
+  }
+
   snapshot(): ServerMetricSnapshot {
     return {
       wsConnections: this.wsConnections,
@@ -106,6 +130,11 @@ export class ServerMetrics {
       syncQueryDurationCount: this.syncQueryDurationCount,
       appendOperationDurationMsTotal: this.appendOperationDurationMsTotal,
       appendOperationDurationCount: this.appendOperationDurationCount,
+      snapshotBuildTotal: this.snapshotBuildTotal,
+      snapshotBuildFailuresTotal: this.snapshotBuildFailuresTotal,
+      snapshotBootstrapTotal: this.snapshotBootstrapTotal,
+      snapshotBytesSentTotal: this.snapshotBytesSentTotal,
+      snapshotSuffixOperationsSentTotal: this.snapshotSuffixOperationsSentTotal,
     };
   }
 
@@ -188,6 +217,36 @@ export class ServerMetrics {
         'counter',
         'Append-operation attempts',
         s.appendOperationDurationCount,
+      ),
+      metric(
+        'lfcw_snapshot_build_total',
+        'counter',
+        'Successful server snapshot cache builds',
+        s.snapshotBuildTotal,
+      ),
+      metric(
+        'lfcw_snapshot_build_failures_total',
+        'counter',
+        'Failed server snapshot cache builds',
+        s.snapshotBuildFailuresTotal,
+      ),
+      metric(
+        'lfcw_snapshot_bootstrap_total',
+        'counter',
+        'Snapshot bootstrap sync responses sent',
+        s.snapshotBootstrapTotal,
+      ),
+      metric(
+        'lfcw_snapshot_bytes_sent_total',
+        'counter',
+        'Serialized CRDT snapshot bytes sent in bootstrap responses',
+        s.snapshotBytesSentTotal,
+      ),
+      metric(
+        'lfcw_snapshot_suffix_operations_sent_total',
+        'counter',
+        'Post-snapshot operations sent in bootstrap responses',
+        s.snapshotSuffixOperationsSentTotal,
       ),
     ].join('');
   }

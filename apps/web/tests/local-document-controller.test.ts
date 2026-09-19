@@ -5,6 +5,7 @@ import { describe, expect, it } from 'vitest';
 import { ROOT_ID, TextReplica, createInsertOperation } from '@lfcw/crdt';
 import { CLIENT_META_KEY, LocalWorkspaceDatabase } from '../src/persistence/database';
 import { DEFAULT_DOCUMENT_ID, LocalDocumentStore } from '../src/persistence/local-document-store';
+import { InvalidServerBaselineError } from '../src/persistence/local-document-store';
 import {
   LocalDocumentController,
   SNAPSHOT_OPERATION_INTERVAL,
@@ -598,6 +599,131 @@ describe('LocalDocumentController', () => {
     expect((await store.loadReplicaSnapshot(documentA))?.knownOperationCount).toBe(4);
     expect(await store.loadReplicaSnapshot(documentB)).toBeUndefined();
     store.close();
+    await new LocalWorkspaceDatabase(databaseName).delete();
+  });
+
+  it('installs a server baseline, reloads from baseline plus local suffix, and skips M4 checkpoints', async () => {
+    const databaseName = uniqueDatabaseName('baseline');
+    const controller = await LocalDocumentController.create({
+      databaseName,
+      clientIdFactory: () => 'client-local',
+      snapshotInterval: 1,
+    });
+    expect(await controller.isSnapshotBootstrapEligible()).toBe(true);
+
+    const prefix = createInsertOperation({
+      clientId: 'seed',
+      counter: 1,
+      lamport: 8,
+      afterId: ROOT_ID,
+      value: 'A',
+    });
+    const replica = new TextReplica();
+    replica.apply(prefix);
+    const suffix = createInsertOperation({
+      clientId: 'seed',
+      counter: 2,
+      lamport: 9,
+      afterId: prefix.opId,
+      value: 'B',
+    });
+
+    const installed = await controller.installServerSnapshot(
+      { version: 1, snapshotSeq: 1, snapshot: replica.exportSnapshot() },
+      [{ serverSeq: 2, operation: suffix }],
+      2,
+    );
+    expect(installed.text).toBe('AB');
+    expect(await controller.isSnapshotBootstrapEligible()).toBe(false);
+
+    const local = await controller.replaceText('ABC');
+    expect(local.snapshot.text).toBe('ABC');
+    expect(local.operations).toHaveLength(1);
+    await controller.close();
+
+    const store = new LocalDocumentStore(new LocalWorkspaceDatabase(databaseName));
+    expect(await store.loadOperations(DEFAULT_DOCUMENT_ID)).toHaveLength(2);
+    expect(await store.loadServerBaseline(DEFAULT_DOCUMENT_ID)).toMatchObject({ snapshotSeq: 1 });
+    expect(await store.loadReplicaSnapshot(DEFAULT_DOCUMENT_ID)).toBeUndefined();
+    store.close();
+
+    const reopened = await LocalDocumentController.create({
+      databaseName,
+      snapshotInterval: 1,
+    });
+    expect(reopened.getSnapshot().text).toBe('ABC');
+    expect(await reopened.loadPendingOperations()).toEqual(local.operations);
+    await reopened.replaceText('ABCD');
+    await reopened.close();
+
+    const after = new LocalDocumentStore(new LocalWorkspaceDatabase(databaseName));
+    expect(await after.loadReplicaSnapshot(DEFAULT_DOCUMENT_ID)).toBeUndefined();
+    after.close();
+    await new LocalWorkspaceDatabase(databaseName).delete();
+  });
+
+  it('fails loudly on a malformed authoritative baseline', async () => {
+    const databaseName = uniqueDatabaseName('bad-baseline');
+    const controller = await LocalDocumentController.create({
+      databaseName,
+      clientIdFactory: () => 'client-local',
+    });
+    const prefix = createInsertOperation({
+      clientId: 'seed',
+      counter: 1,
+      lamport: 1,
+      afterId: ROOT_ID,
+      value: 'A',
+    });
+    const replica = new TextReplica();
+    replica.apply(prefix);
+    await controller.installServerSnapshot(
+      { version: 1, snapshotSeq: 1, snapshot: replica.exportSnapshot() },
+      [],
+      1,
+    );
+    await controller.close();
+
+    const database = new LocalWorkspaceDatabase(databaseName);
+    await database.open();
+    await database.serverBaselines.put({
+      documentId: DEFAULT_DOCUMENT_ID,
+      snapshotSeq: 1,
+      snapshot: {
+        version: 1,
+        nodes: [
+          {
+            id: 'seed:1',
+            afterId: 'missing:1',
+            value: 'A',
+            clientId: 'seed',
+            counter: 1,
+            lamport: 1,
+            tombstone: false,
+          },
+        ],
+        deleteOperations: [],
+      },
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    database.close();
+
+    await expect(LocalDocumentController.create({ databaseName })).rejects.toBeInstanceOf(
+      InvalidServerBaselineError,
+    );
+    await new LocalWorkspaceDatabase(databaseName).delete();
+  });
+
+  it('treats a local edit as making snapshot bootstrap ineligible', async () => {
+    const databaseName = uniqueDatabaseName('eligible-edit');
+    const controller = await LocalDocumentController.create({
+      databaseName,
+      clientIdFactory: () => 'client-local',
+    });
+    expect(await controller.isSnapshotBootstrapEligible()).toBe(true);
+    await controller.replaceText('Hi');
+    expect(await controller.isSnapshotBootstrapEligible()).toBe(false);
+    await controller.close();
     await new LocalWorkspaceDatabase(databaseName).delete();
   });
 });

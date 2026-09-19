@@ -6,24 +6,24 @@ Implemented through Milestone 6. Message shapes are unchanged from Milestone 3; 
 
 ## Principle
 
-Reconnect synchronization is operation based.
+Reconnect synchronization is operation based, with an optional snapshot bootstrap for explicitly capable, cursor-0, pristine clients.
 
-The server never resolves collaboration by replacing the client document with a whole-document last-write-wins value.
+The server never resolves collaboration by replacing the client document with a whole-document last-write-wins value. Server snapshots are a derived cache of a CRDT prefix. Complete SQLite operation history is retained.
 
 ## Current Messages
 
 Client:
 
-- `join` — `{ documentId, clientId, lastServerSeq }`
+- `join` — `{ documentId, clientId, lastServerSeq, capabilities? }`
 - `submit-operation` — `{ documentId, operation }`
 
 Server:
 
-- `sync` — missing document history after the client's `lastServerSeq`, through a fixed `latestServerSeq` barrier
+- `sync` — missing document history after the client's `lastServerSeq`, through a fixed `latestServerSeq` barrier. Optional `snapshotBootstrap` is present only when the client advertised `snapshot-bootstrap-v1`, `lastServerSeq` is 0, and a valid snapshot cache is used. In that case `operations` is only the post-snapshot suffix.
 - `operation` — one sequenced live operation; this is also the durable acceptance signal
 - `error` — protocol, validation, identity-conflict, or `sync-cursor-ahead`
 
-There is no separate ACK message.
+There is no separate ACK message. There is no protocol version field besides the optional capability string `snapshot-bootstrap-v1`. M7 clients omit capabilities and must receive full/incremental operation history. An M8 client still accepts operations-only `sync`.
 
 ## Reconnect Flow
 
@@ -106,7 +106,7 @@ Integer semantics are unchanged. There are no new charset restrictions beyond ex
 
 ## Transport boundaries
 
-Inbound WebSocket frames are bounded by `WS_MAX_PAYLOAD_BYTES` (default 262144). This does **not** bound outbound `sync` history: a fresh client still receives the full server operation list for that document.
+Inbound WebSocket frames are bounded by `WS_MAX_PAYLOAD_BYTES` (default 262144). This does **not** bound outbound `sync` history or snapshot bootstrap payloads.
 
 Optional `WS_ALLOWED_ORIGINS` can reject browser upgrades whose `Origin` does not exactly match. Empty allowlist disables filtering. Missing `Origin` remains allowed for non-browser clients. Origin allowlisting is not authentication.
 

@@ -5,6 +5,10 @@ export const MAX_CLIENT_ID_LENGTH = 128;
 export const MAX_OPERATION_ID_LENGTH = 256;
 export const MAX_ELEMENT_ID_LENGTH = 256;
 export const MAX_OPERATION_VALUE_LENGTH = 16384;
+export const MAX_CAPABILITY_LENGTH = 64;
+export const MAX_CAPABILITIES = 16;
+
+export const SNAPSHOT_BOOTSTRAP_CAPABILITY = 'snapshot-bootstrap-v1' as const;
 
 const boundedString = (max: number) => z.string().min(1).max(max);
 
@@ -48,11 +52,14 @@ export const textOperationSchema = z.discriminatedUnion('kind', [
   deleteOperationSchema,
 ]);
 
+const capabilitySchema = z.string().min(1).max(MAX_CAPABILITY_LENGTH);
+
 export const joinMessageSchema = z.object({
   type: z.literal('join'),
   documentId: boundedString(MAX_DOCUMENT_ID_LENGTH),
   clientId: boundedString(MAX_CLIENT_ID_LENGTH),
   lastServerSeq: nonNegativeSafeInteger,
+  capabilities: z.array(capabilitySchema).max(MAX_CAPABILITIES).optional(),
 });
 
 export const submitOperationMessageSchema = z.object({
@@ -71,11 +78,18 @@ export const sequencedOperationSchema = z.object({
   operation: textOperationSchema,
 });
 
+export const snapshotBootstrapSchema = z.object({
+  version: z.literal(1),
+  snapshotSeq: positiveSafeInteger,
+  snapshot: z.unknown(),
+});
+
 export const syncMessageSchema = z.object({
   type: z.literal('sync'),
   documentId: boundedString(MAX_DOCUMENT_ID_LENGTH),
   operations: z.array(sequencedOperationSchema),
   latestServerSeq: nonNegativeSafeInteger,
+  snapshotBootstrap: snapshotBootstrapSchema.optional(),
 });
 
 export const operationMessageSchema = z.object({
@@ -104,10 +118,17 @@ export type JoinMessage = z.infer<typeof joinMessageSchema>;
 export type SubmitOperationMessage = z.infer<typeof submitOperationMessageSchema>;
 export type ClientMessage = z.infer<typeof clientMessageSchema>;
 export type SequencedOperation = z.infer<typeof sequencedOperationSchema>;
+export type SnapshotBootstrap = z.infer<typeof snapshotBootstrapSchema>;
 export type SyncMessage = z.infer<typeof syncMessageSchema>;
 export type OperationMessage = z.infer<typeof operationMessageSchema>;
 export type ErrorMessage = z.infer<typeof errorMessageSchema>;
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
+
+export function hasSnapshotBootstrapCapability(
+  capabilities: readonly string[] | undefined,
+): boolean {
+  return capabilities?.includes(SNAPSHOT_BOOTSTRAP_CAPABILITY) === true;
+}
 
 export function parseClientMessage(input: unknown): ClientMessage {
   return clientMessageSchema.parse(input);

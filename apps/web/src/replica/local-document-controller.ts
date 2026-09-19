@@ -1,15 +1,16 @@
 import { OperationIdentityConflictError, TextReplica } from '@lfcw/crdt';
 import type { TextOperation, TextReplicaSnapshot, VisibleElement } from '@lfcw/crdt';
-import type { SequencedOperation } from '@lfcw/protocol';
+import type { SequencedOperation, SnapshotBootstrap } from '@lfcw/protocol';
 import { computeLocalTextEdit } from '../editor/text-edit';
 import { LocalWorkspaceDatabase } from '../persistence/database';
 import {
   DEFAULT_DOCUMENT_ID,
   DEFAULT_DOCUMENT_TITLE,
+  InvalidServerBaselineError,
   LocalDocumentStore,
 } from '../persistence/local-document-store';
 import type { LocalDocumentStoreOptions } from '../persistence/local-document-store';
-import type { ReplicaSnapshotRecord } from '../persistence/database';
+import type { ReplicaSnapshotRecord, ServerBaselineRecord } from '../persistence/database';
 
 export class ControllerClosedError extends Error {
   constructor() {
@@ -54,10 +55,12 @@ export class LocalDocumentController {
   private lastSnapshotOperationCount = 0;
   private closing = false;
   private closePromise: Promise<void> | null = null;
+  private replica: TextReplica;
+  private hasServerBaseline: boolean;
 
   private constructor(
     private readonly store: LocalDocumentStore,
-    private readonly replica: TextReplica,
+    replica: TextReplica,
     private readonly documentId: string,
     private readonly clientId: string,
     private readonly title: string,
@@ -67,7 +70,11 @@ export class LocalDocumentController {
       snapshot: TextReplicaSnapshot,
       knownOperationCount: number,
     ) => Promise<void>,
-  ) {}
+    hasServerBaseline: boolean,
+  ) {
+    this.replica = replica;
+    this.hasServerBaseline = hasServerBaseline;
+  }
 
   static async create(
     options: LocalDocumentControllerOptions = {},
@@ -88,13 +95,31 @@ export class LocalDocumentController {
 
     const initialized = await store.initialize(documentId, defaultTitle);
     const operations = await store.loadOperations(initialized.document.id);
-    const checkpoint = await store.loadReplicaSnapshot(initialized.document.id);
+    const baseline = await store.loadServerBaseline(initialized.document.id);
+    const checkpoint = baseline
+      ? undefined
+      : await store.loadReplicaSnapshot(initialized.document.id);
     const persistCheckpoint =
       options.persistCheckpoint ??
       ((documentId, snapshot, knownOperationCount) =>
         store.saveReplicaSnapshot(documentId, snapshot, knownOperationCount));
 
-    const { replica, lastSnapshotOperationCount } = restoreReplica(operations, checkpoint);
+    let replica: TextReplica;
+    let lastSnapshotOperationCount = 0;
+    const lastServerSeq = await store.getLastServerSeq(initialized.document.id);
+
+    try {
+      if (baseline) {
+        replica = restoreFromServerBaseline(baseline, operations, lastServerSeq);
+      } else {
+        const restored = restoreReplica(operations, checkpoint);
+        replica = restored.replica;
+        lastSnapshotOperationCount = restored.lastSnapshotOperationCount;
+      }
+    } catch (error) {
+      store.close();
+      throw error;
+    }
 
     const unresolved = replica.getUnresolvedOperationIds();
 
@@ -114,6 +139,7 @@ export class LocalDocumentController {
       initialized.document.title,
       snapshotInterval,
       persistCheckpoint,
+      Boolean(baseline),
     );
     controller.lastSnapshotOperationCount = lastSnapshotOperationCount;
     await controller.maybeCreateCheckpoint();
@@ -133,6 +159,10 @@ export class LocalDocumentController {
 
   loadPendingOperations(): Promise<TextOperation[]> {
     return this.store.loadPendingOperations(this.documentId);
+  }
+
+  isSnapshotBootstrapEligible(): Promise<boolean> {
+    return this.store.isSnapshotBootstrapEligible(this.documentId);
   }
 
   getSnapshot(): LocalDocumentSnapshot {
@@ -169,6 +199,27 @@ export class LocalDocumentController {
 
     const result = this.writeQueue.then(() =>
       this.applyServerOperationsNow(sequencedOperations, confirmedThroughServerSeq),
+    );
+
+    this.writeQueue = result.then(
+      () => undefined,
+      () => undefined,
+    );
+
+    return result;
+  }
+
+  installServerSnapshot(
+    bootstrap: SnapshotBootstrap,
+    sequencedOperations: readonly SequencedOperation[],
+    confirmedThroughServerSeq: number,
+  ): Promise<LocalDocumentSnapshot> {
+    if (this.closing) {
+      return Promise.reject(new ControllerClosedError());
+    }
+
+    const result = this.writeQueue.then(() =>
+      this.installServerSnapshotNow(bootstrap, sequencedOperations, confirmedThroughServerSeq),
     );
 
     this.writeQueue = result.then(
@@ -236,7 +287,25 @@ export class LocalDocumentController {
     return this.getSnapshot();
   }
 
+  private async installServerSnapshotNow(
+    bootstrap: SnapshotBootstrap,
+    sequencedOperations: readonly SequencedOperation[],
+    confirmedThroughServerSeq: number,
+  ): Promise<LocalDocumentSnapshot> {
+    this.replica = await this.store.installServerBaseline(
+      this.documentId,
+      bootstrap,
+      sequencedOperations,
+      confirmedThroughServerSeq,
+    );
+    this.hasServerBaseline = true;
+    return this.getSnapshot();
+  }
+
   private async maybeCreateCheckpoint(): Promise<void> {
+    if (this.hasServerBaseline) {
+      return;
+    }
     if (this.replica.getUnresolvedOperationIds().length > 0) {
       return;
     }
@@ -267,6 +336,37 @@ function resolveSnapshotInterval(value: number | undefined): number {
   }
 
   return value;
+}
+
+function restoreFromServerBaseline(
+  baseline: ServerBaselineRecord,
+  operations: readonly TextOperation[],
+  lastServerSeq: number,
+): TextReplica {
+  if (!Number.isSafeInteger(baseline.snapshotSeq) || baseline.snapshotSeq < 1) {
+    throw new InvalidServerBaselineError(
+      'Server baseline snapshotSeq must be a positive safe integer.',
+    );
+  }
+
+  if (!Number.isSafeInteger(lastServerSeq) || lastServerSeq < baseline.snapshotSeq) {
+    throw new InvalidServerBaselineError(
+      'syncState.lastServerSeq must be at least the installed server baseline snapshotSeq.',
+    );
+  }
+
+  try {
+    const replica = TextReplica.fromSnapshot(baseline.snapshot);
+    replica.applyAll(operations);
+    return replica;
+  } catch (error) {
+    if (error instanceof InvalidServerBaselineError) {
+      throw error;
+    }
+
+    const message = error instanceof Error ? error.message : 'Invalid server baseline.';
+    throw new InvalidServerBaselineError(message);
+  }
 }
 
 function restoreReplica(

@@ -60,7 +60,7 @@ The permanent gate is Chromium-only, serial (`workers: 1`, `retries: 0`), and ru
 
 First-time browsers: `npm run test:e2e:install`. Then `npm run test:e2e`. `npm test` stays Vitest-only.
 
-The suite covers workspace navigation (including invalid links), two-context realtime collaboration, offline reload plus reconnect outbox flush, inactive-document outbox, and the IME document-switch regression. It does not clone every M3/M5 manual scenario, does not run Firefox/WebKit, and does not re-test protocol/Origin/metrics/heartbeat/shutdown in the browser.
+The suite covers workspace navigation (including invalid links), two-context realtime collaboration, offline reload plus reconnect outbox flush, inactive-document outbox, the IME document-switch regression, and one focused snapshot-bootstrap case (fresh contexts against a ≥1000-op document). Small-history documents continue to use full-history sync. It does not clone every M3/M5 manual scenario, does not run Firefox/WebKit, and does not re-test protocol/Origin/metrics/heartbeat/shutdown in the browser.
 
 CI runs this gate after core checks. Failures upload `playwright-report/` and `test-results/` (traces and screenshots on failure only).
 

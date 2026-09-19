@@ -1,10 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_CAPABILITIES,
+  MAX_CAPABILITY_LENGTH,
   MAX_CLIENT_ID_LENGTH,
   MAX_DOCUMENT_ID_LENGTH,
   MAX_ELEMENT_ID_LENGTH,
   MAX_OPERATION_ID_LENGTH,
   MAX_OPERATION_VALUE_LENGTH,
+  SNAPSHOT_BOOTSTRAP_CAPABILITY,
   parseClientMessage,
   parseServerMessage,
   textOperationSchema,
@@ -295,6 +298,49 @@ describe('parseClientMessage', () => {
       }).documentId,
     ).toBe('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee');
   });
+
+  it('accepts join without capabilities and with snapshot-bootstrap-v1', () => {
+    expect(
+      parseClientMessage({
+        type: 'join',
+        documentId: 'local-default-document',
+        clientId: 'client-a',
+        lastServerSeq: 0,
+      }),
+    ).not.toHaveProperty('capabilities');
+
+    expect(
+      parseClientMessage({
+        type: 'join',
+        documentId: 'local-default-document',
+        clientId: 'client-a',
+        lastServerSeq: 0,
+        capabilities: [SNAPSHOT_BOOTSTRAP_CAPABILITY],
+      }).capabilities,
+    ).toEqual([SNAPSHOT_BOOTSTRAP_CAPABILITY]);
+  });
+
+  it('rejects an oversized capabilities collection or capability string', () => {
+    expect(() =>
+      parseClientMessage({
+        type: 'join',
+        documentId: 'local-default-document',
+        clientId: 'client-a',
+        lastServerSeq: 0,
+        capabilities: Array.from({ length: MAX_CAPABILITIES + 1 }, (_, index) => `cap-${index}`),
+      }),
+    ).toThrow();
+
+    expect(() =>
+      parseClientMessage({
+        type: 'join',
+        documentId: 'local-default-document',
+        clientId: 'client-a',
+        lastServerSeq: 0,
+        capabilities: ['c'.repeat(MAX_CAPABILITY_LENGTH + 1)],
+      }),
+    ).toThrow();
+  });
 });
 
 describe('parseServerMessage', () => {
@@ -335,6 +381,57 @@ describe('parseServerMessage', () => {
       operations: [],
       latestServerSeq: 0,
     });
+  });
+
+  it('accepts sync with an optional snapshotBootstrap envelope', () => {
+    expect(
+      parseServerMessage({
+        type: 'sync',
+        documentId: 'local-default-document',
+        operations: [],
+        latestServerSeq: 4,
+        snapshotBootstrap: {
+          version: 1,
+          snapshotSeq: 4,
+          snapshot: { version: 1, nodes: [], deleteOperations: [] },
+        },
+      }),
+    ).toMatchObject({
+      snapshotBootstrap: {
+        version: 1,
+        snapshotSeq: 4,
+      },
+    });
+  });
+
+  it('rejects an invalid snapshotBootstrap version or sequence', () => {
+    expect(() =>
+      parseServerMessage({
+        type: 'sync',
+        documentId: 'doc',
+        operations: [],
+        latestServerSeq: 1,
+        snapshotBootstrap: {
+          version: 2,
+          snapshotSeq: 1,
+          snapshot: {},
+        },
+      }),
+    ).toThrow();
+
+    expect(() =>
+      parseServerMessage({
+        type: 'sync',
+        documentId: 'doc',
+        operations: [],
+        latestServerSeq: 1,
+        snapshotBootstrap: {
+          version: 1,
+          snapshotSeq: 0,
+          snapshot: {},
+        },
+      }),
+    ).toThrow();
   });
 
   it('rejects a malformed server message', () => {

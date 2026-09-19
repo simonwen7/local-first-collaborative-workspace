@@ -1,6 +1,10 @@
 import type { TextOperation } from '@lfcw/crdt';
-import type { SequencedOperation } from '@lfcw/protocol';
-import { parseServerMessage } from '@lfcw/protocol';
+import type { SequencedOperation, SnapshotBootstrap } from '@lfcw/protocol';
+import { SNAPSHOT_BOOTSTRAP_CAPABILITY, parseServerMessage } from '@lfcw/protocol';
+import {
+  InvalidSnapshotBootstrapError,
+  SnapshotBootstrapIneligibleError,
+} from '../persistence/local-document-store';
 import { DEFAULT_DEV_SYNC_URL, resolveSyncUrl } from './sync-url';
 
 export const DEFAULT_SYNC_URL = DEFAULT_DEV_SYNC_URL;
@@ -19,6 +23,12 @@ export interface DocumentSyncClientOptions {
     sequencedOperations: readonly SequencedOperation[],
     confirmedThroughServerSeq: number,
   ) => Promise<void> | void;
+  readonly isSnapshotBootstrapEligible?: () => Promise<boolean> | boolean;
+  readonly onSnapshotBootstrap?: (
+    bootstrap: SnapshotBootstrap,
+    sequencedOperations: readonly SequencedOperation[],
+    confirmedThroughServerSeq: number,
+  ) => Promise<void> | void;
   readonly onStatusChange?: (status: SyncStatus) => void;
 }
 
@@ -29,6 +39,8 @@ export class DocumentSyncClient {
   private readonly getLastServerSeq: DocumentSyncClientOptions['getLastServerSeq'];
   private readonly loadPendingOperations: DocumentSyncClientOptions['loadPendingOperations'];
   private readonly onServerOperations: DocumentSyncClientOptions['onServerOperations'];
+  private readonly isSnapshotBootstrapEligible?: DocumentSyncClientOptions['isSnapshotBootstrapEligible'];
+  private readonly onSnapshotBootstrap?: DocumentSyncClientOptions['onSnapshotBootstrap'];
   private readonly onStatusChange?: (status: SyncStatus) => void;
 
   private socket: WebSocket | null = null;
@@ -38,6 +50,7 @@ export class DocumentSyncClient {
   private catchUpComplete = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private snapshotBootstrapDisabled = false;
 
   constructor(options: DocumentSyncClientOptions) {
     this.documentId = options.documentId;
@@ -46,6 +59,14 @@ export class DocumentSyncClient {
     this.getLastServerSeq = options.getLastServerSeq;
     this.loadPendingOperations = options.loadPendingOperations;
     this.onServerOperations = options.onServerOperations;
+
+    if (options.isSnapshotBootstrapEligible !== undefined) {
+      this.isSnapshotBootstrapEligible = options.isSnapshotBootstrapEligible;
+    }
+
+    if (options.onSnapshotBootstrap !== undefined) {
+      this.onSnapshotBootstrap = options.onSnapshotBootstrap;
+    }
 
     if (options.onStatusChange !== undefined) {
       this.onStatusChange = options.onStatusChange;
@@ -144,12 +165,23 @@ export class DocumentSyncClient {
       return;
     }
 
+    const advertiseSnapshot =
+      !this.snapshotBootstrapDisabled &&
+      lastServerSeq === 0 &&
+      this.isSnapshotBootstrapEligible !== undefined &&
+      (await this.isSnapshotBootstrapEligible());
+
+    if (this.socket !== socket || socket.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
     socket.send(
       JSON.stringify({
         type: 'join',
         documentId: this.documentId,
         clientId: this.clientId,
         lastServerSeq,
+        ...(advertiseSnapshot ? { capabilities: [SNAPSHOT_BOOTSTRAP_CAPABILITY] } : {}),
       }),
     );
   }
@@ -194,7 +226,21 @@ export class DocumentSyncClient {
 
     if (message.type === 'sync') {
       this.setStatus('syncing');
-      await this.onServerOperations(message.operations, message.latestServerSeq);
+
+      if (message.snapshotBootstrap) {
+        const installed = await this.installSnapshotBootstrap(
+          message.snapshotBootstrap,
+          message.operations,
+          message.latestServerSeq,
+        );
+
+        if (!installed) {
+          return;
+        }
+      } else {
+        await this.onServerOperations(message.operations, message.latestServerSeq);
+      }
+
       this.catchUpComplete = true;
       this.reconnectAttempt = 0;
       await this.flushOutbox();
@@ -212,6 +258,39 @@ export class DocumentSyncClient {
       message.serverSeq,
     );
     await this.refreshOnlineStatus();
+  }
+
+  private async installSnapshotBootstrap(
+    bootstrap: SnapshotBootstrap,
+    sequencedOperations: readonly SequencedOperation[],
+    confirmedThroughServerSeq: number,
+  ): Promise<boolean> {
+    if (!this.onSnapshotBootstrap) {
+      this.fallbackToFullHistorySync();
+      return false;
+    }
+
+    try {
+      await this.onSnapshotBootstrap(bootstrap, sequencedOperations, confirmedThroughServerSeq);
+      return true;
+    } catch (error) {
+      if (
+        error instanceof SnapshotBootstrapIneligibleError ||
+        error instanceof InvalidSnapshotBootstrapError
+      ) {
+        this.fallbackToFullHistorySync();
+        return false;
+      }
+
+      throw error;
+    }
+  }
+
+  private fallbackToFullHistorySync(): void {
+    this.snapshotBootstrapDisabled = true;
+    this.catchUpComplete = false;
+    this.setStatus('connecting');
+    this.socket?.close();
   }
 
   private async flushOutbox(): Promise<void> {

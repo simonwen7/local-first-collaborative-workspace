@@ -35,6 +35,9 @@ describe('ServerMetrics', () => {
     metrics.recordInternalError();
     metrics.recordIdentityConflict();
     metrics.recordDuplicate();
+    metrics.recordSnapshotBuild();
+    metrics.recordSnapshotBuildFailure();
+    metrics.recordSnapshotBootstrap(128, 4);
 
     const body = metrics.renderPrometheus();
 
@@ -45,6 +48,11 @@ describe('ServerMetrics', () => {
     expect(body).toMatch(/lfcw_internal_errors_total 1/);
     expect(body).toMatch(/lfcw_identity_conflicts_total 1/);
     expect(body).toMatch(/lfcw_duplicate_operations_total 1/);
+    expect(body).toMatch(/lfcw_snapshot_build_total 1/);
+    expect(body).toMatch(/lfcw_snapshot_build_failures_total 1/);
+    expect(body).toMatch(/lfcw_snapshot_bootstrap_total 1/);
+    expect(body).toMatch(/lfcw_snapshot_bytes_sent_total 128/);
+    expect(body).toMatch(/lfcw_snapshot_suffix_operations_sent_total 4/);
     expect(body).not.toContain('documentId');
     expect(body).not.toContain('clientId');
   });

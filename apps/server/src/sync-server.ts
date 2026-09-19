@@ -10,6 +10,7 @@ import {
 import type { TextOperation } from '@lfcw/crdt';
 import {
   parseClientMessage,
+  hasSnapshotBootstrapCapability,
   type ErrorMessage,
   type OperationMessage,
   type SyncMessage,
@@ -17,6 +18,7 @@ import {
 import type { ServerConfig } from './config.js';
 import type { ServerMetrics } from './observability/server-metrics.js';
 import type { OperationStore } from './operation-store.js';
+import type { ServerSnapshotManager } from './server-snapshot.js';
 
 export interface SyncServerLogger {
   info(fields: Record<string, unknown>, message: string): void;
@@ -46,6 +48,7 @@ export function attachSyncServer(
   app: FastifyInstance,
   store: OperationStore,
   options: AttachSyncServerOptions,
+  snapshots: ServerSnapshotManager,
 ): SyncServer {
   const { config, metrics, logger } = options;
   const wss = new WebSocketServer({
@@ -203,7 +206,14 @@ export function attachSyncServer(
           return;
         }
 
-        joinSocket(socket, session, message.documentId, message.clientId, message.lastServerSeq);
+        joinSocket(
+          socket,
+          session,
+          message.documentId,
+          message.clientId,
+          message.lastServerSeq,
+          hasSnapshotBootstrapCapability(message.capabilities),
+        );
         return;
       }
 
@@ -249,6 +259,7 @@ export function attachSyncServer(
     documentId: string,
     clientId: string,
     lastServerSeq: number,
+    snapshotCapable: boolean,
   ) => {
     const currentLatest = store.getLatestServerSeq(documentId);
 
@@ -285,25 +296,19 @@ export function attachSyncServer(
     );
 
     const queryStarted = performance.now();
-    const barrier = store.getLatestServerSeq(documentId);
-    const operations = store.loadOperationsAfter(documentId, lastServerSeq, barrier);
+    const syncMessage = snapshots.buildSyncMessage(documentId, lastServerSeq, snapshotCapable);
     const durationMs = performance.now() - queryStarted;
-    const syncMessage: SyncMessage = {
-      type: 'sync',
-      documentId,
-      operations,
-      latestServerSeq: barrier,
-    };
 
-    metrics.recordSync(operations.length, durationMs);
+    metrics.recordSync(syncMessage.operations.length, durationMs);
     sendJson(socket, session, syncMessage);
     logger.info(
       {
         connectionId: session.connectionId,
         documentId,
         clientId,
-        serverSeq: barrier,
-        syncOperationCount: operations.length,
+        serverSeq: syncMessage.latestServerSeq,
+        syncOperationCount: syncMessage.operations.length,
+        snapshotBootstrap: Boolean(syncMessage.snapshotBootstrap),
       },
       'ws_sync_sent',
     );

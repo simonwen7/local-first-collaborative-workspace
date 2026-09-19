@@ -1,12 +1,13 @@
 import {
   OperationIdentityConflictError,
+  TextReplica,
   createDeleteOperation,
   createInsertOperation,
   operationsEqual,
   validateOperation,
 } from '@lfcw/crdt';
 import type { TextOperation, TextReplicaSnapshot } from '@lfcw/crdt';
-import type { SequencedOperation } from '@lfcw/protocol';
+import type { SequencedOperation, SnapshotBootstrap } from '@lfcw/protocol';
 import type { LocalTextEdit } from '../editor/text-edit';
 import { CLIENT_META_KEY, LocalWorkspaceDatabase } from './database';
 import type {
@@ -15,6 +16,7 @@ import type {
   OperationRecord,
   OutboxRecord,
   ReplicaSnapshotRecord,
+  ServerBaselineRecord,
 } from './database';
 
 export const DEFAULT_DOCUMENT_ID = 'local-default-document';
@@ -35,6 +37,27 @@ export class InvalidServerBatchError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'InvalidServerBatchError';
+  }
+}
+
+export class SnapshotBootstrapIneligibleError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'SnapshotBootstrapIneligibleError';
+  }
+}
+
+export class InvalidSnapshotBootstrapError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidSnapshotBootstrapError';
+  }
+}
+
+export class InvalidServerBaselineError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidServerBaselineError';
   }
 }
 
@@ -152,6 +175,22 @@ export class LocalDocumentStore {
     return syncState?.lastServerSeq ?? 0;
   }
 
+  async loadServerBaseline(documentId: string): Promise<ServerBaselineRecord | undefined> {
+    return this.database.serverBaselines.get(documentId);
+  }
+
+  async isSnapshotBootstrapEligible(documentId: string): Promise<boolean> {
+    const lastServerSeq = await this.getLastServerSeq(documentId);
+    const baseline = await this.loadServerBaseline(documentId);
+    const operationCount = await this.database.operations
+      .where('documentId')
+      .equals(documentId)
+      .count();
+    const outboxCount = await this.database.outbox.where('documentId').equals(documentId).count();
+
+    return lastServerSeq === 0 && !baseline && operationCount === 0 && outboxCount === 0;
+  }
+
   async loadReplicaSnapshot(documentId: string): Promise<ReplicaSnapshotRecord | undefined> {
     return this.database.replicaSnapshots.get(documentId);
   }
@@ -169,6 +208,115 @@ export class LocalDocumentStore {
     };
 
     await this.database.replicaSnapshots.put(record);
+  }
+
+  async installServerBaseline(
+    documentId: string,
+    bootstrap: SnapshotBootstrap,
+    sequencedOperations: readonly SequencedOperation[],
+    confirmedThroughServerSeq: number,
+  ): Promise<TextReplica> {
+    const snapshot = parseBootstrapSnapshot(bootstrap);
+    validateSnapshotSuffix(sequencedOperations, bootstrap.snapshotSeq, confirmedThroughServerSeq);
+
+    let replica: TextReplica;
+
+    try {
+      replica = TextReplica.fromSnapshot(snapshot);
+      replica.applyAll(sequencedOperations.map((item) => item.operation));
+    } catch (error) {
+      if (error instanceof InvalidSnapshotBootstrapError) {
+        throw error;
+      }
+
+      const message = error instanceof Error ? error.message : 'Invalid snapshot bootstrap.';
+      throw new InvalidSnapshotBootstrapError(message);
+    }
+
+    if (replica.getUnresolvedOperationIds().length > 0) {
+      throw new InvalidSnapshotBootstrapError(
+        `Snapshot bootstrap left unresolved dependencies: ${replica.getUnresolvedOperationIds().join(', ')}`,
+      );
+    }
+
+    const prefixLamport = maxLamportFromSnapshot(snapshot);
+    const suffixLamport = sequencedOperations.reduce(
+      (max, item) => Math.max(max, item.operation.lamport),
+      0,
+    );
+    const historicalLamport = Math.max(prefixLamport, suffixLamport);
+
+    await this.database.transaction(
+      'rw',
+      [
+        this.database.clientMeta,
+        this.database.documents,
+        this.database.operations,
+        this.database.outbox,
+        this.database.syncState,
+        this.database.serverBaselines,
+        this.database.replicaSnapshots,
+      ],
+      async () => {
+        const eligible = await this.isSnapshotBootstrapEligible(documentId);
+
+        if (!eligible) {
+          throw new SnapshotBootstrapIneligibleError(
+            `Document "${documentId}" is no longer eligible for snapshot bootstrap.`,
+          );
+        }
+
+        const clientMeta = await this.database.clientMeta.get(CLIENT_META_KEY);
+
+        if (!clientMeta) {
+          throw new Error('Local client metadata is missing.');
+        }
+
+        const document = await this.database.documents.get(documentId);
+
+        if (!document) {
+          throw new Error(`Document "${documentId}" does not exist.`);
+        }
+
+        const timestamp = this.now();
+        const operationRecords: OperationRecord[] = sequencedOperations.map((item) => ({
+          opId: item.operation.opId,
+          documentId,
+          operation: item.operation,
+          createdAt: timestamp,
+        }));
+
+        if (operationRecords.length > 0) {
+          await this.database.operations.bulkAdd(operationRecords);
+        }
+
+        await this.database.serverBaselines.put({
+          documentId,
+          snapshotSeq: bootstrap.snapshotSeq,
+          snapshot,
+          createdAt: timestamp,
+        });
+
+        await this.database.syncState.put({
+          documentId,
+          lastServerSeq: confirmedThroughServerSeq,
+        });
+
+        await this.database.clientMeta.put({
+          ...clientMeta,
+          lamportClock: Math.max(clientMeta.lamportClock, historicalLamport),
+        });
+
+        await this.database.documents.put({
+          ...document,
+          updatedAt: timestamp,
+        });
+
+        await this.database.replicaSnapshots.delete(documentId);
+      },
+    );
+
+    return replica;
   }
 
   async persistLocalTextEdit(documentId: string, edit: LocalTextEdit): Promise<TextOperation[]> {
@@ -416,4 +564,57 @@ export function validateServerBatch(
 
     previousServerSeq = item.serverSeq;
   }
+}
+
+export function validateSnapshotSuffix(
+  sequencedOperations: readonly SequencedOperation[],
+  snapshotSeq: number,
+  confirmedThroughServerSeq: number,
+): void {
+  if (!Number.isSafeInteger(snapshotSeq) || snapshotSeq < 1) {
+    throw new InvalidSnapshotBootstrapError('snapshotSeq must be a positive safe integer.');
+  }
+
+  if (snapshotSeq > confirmedThroughServerSeq) {
+    throw new InvalidSnapshotBootstrapError('snapshotSeq must not exceed latestServerSeq.');
+  }
+
+  try {
+    validateServerBatch(sequencedOperations, confirmedThroughServerSeq);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Invalid snapshot suffix.';
+    throw new InvalidSnapshotBootstrapError(message);
+  }
+
+  for (const item of sequencedOperations) {
+    if (item.serverSeq <= snapshotSeq) {
+      throw new InvalidSnapshotBootstrapError(
+        'Snapshot suffix serverSeq values must be greater than snapshotSeq.',
+      );
+    }
+  }
+}
+
+export function maxLamportFromSnapshot(snapshot: TextReplicaSnapshot): number {
+  let max = 0;
+
+  for (const node of snapshot.nodes) {
+    max = Math.max(max, node.lamport);
+  }
+
+  for (const operation of snapshot.deleteOperations) {
+    max = Math.max(max, operation.lamport);
+  }
+
+  return max;
+}
+
+function parseBootstrapSnapshot(bootstrap: SnapshotBootstrap): TextReplicaSnapshot {
+  if (bootstrap.version !== 1) {
+    throw new InvalidSnapshotBootstrapError(
+      `Unsupported snapshot bootstrap version "${String(bootstrap.version)}".`,
+    );
+  }
+
+  return bootstrap.snapshot as TextReplicaSnapshot;
 }

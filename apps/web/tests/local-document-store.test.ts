@@ -9,7 +9,11 @@ import {
   createInsertOperation,
 } from '@lfcw/crdt';
 import { CLIENT_META_KEY, LocalWorkspaceDatabase } from '../src/persistence/database';
-import { LocalDocumentStore } from '../src/persistence/local-document-store';
+import {
+  InvalidSnapshotBootstrapError,
+  LocalDocumentStore,
+  SnapshotBootstrapIneligibleError,
+} from '../src/persistence/local-document-store';
 
 function uniqueDatabaseName(label: string): string {
   return `lfcw-test-${label}-${crypto.randomUUID()}`;
@@ -500,4 +504,225 @@ describe('LocalDocumentStore', () => {
 
     await database.delete();
   });
+
+  it('migrates a v3 database onto empty serverBaselines without rewriting history', async () => {
+    const databaseName = uniqueDatabaseName('migrate-v3');
+    const legacy = new Dexie(databaseName);
+    legacy.version(3).stores({
+      clientMeta: '&key',
+      documents: '&id, updatedAt',
+      operations: '&opId, documentId, createdAt',
+      outbox: '&opId, documentId, createdAt',
+      syncState: '&documentId',
+      replicaSnapshots: '&documentId, createdAt',
+    });
+
+    const localOperation = createInsertOperation({
+      clientId: 'client-v3',
+      counter: 1,
+      lamport: 1,
+      afterId: ROOT_ID,
+      value: 'L',
+    });
+
+    await legacy.open();
+    await legacy.table('clientMeta').add({
+      key: CLIENT_META_KEY,
+      clientId: 'client-v3',
+      nextCounter: 2,
+      lamportClock: 1,
+    });
+    await legacy.table('documents').add({
+      id: 'local-default-document',
+      title: 'Local Document',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    await legacy.table('operations').add({
+      opId: localOperation.opId,
+      documentId: 'local-default-document',
+      operation: localOperation,
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    await legacy.table('outbox').add({
+      opId: localOperation.opId,
+      documentId: 'local-default-document',
+      createdAt: 1,
+    });
+    await legacy.table('syncState').add({
+      documentId: 'local-default-document',
+      lastServerSeq: 4,
+    });
+    const replica = new TextReplica();
+    replica.apply(localOperation);
+    await legacy.table('replicaSnapshots').add({
+      documentId: 'local-default-document',
+      snapshot: replica.exportSnapshot(),
+      knownOperationCount: 1,
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    legacy.close();
+
+    const upgraded = new LocalWorkspaceDatabase(databaseName);
+    const store = new LocalDocumentStore(upgraded);
+    await store.initialize();
+
+    expect(await store.loadOperations('local-default-document')).toEqual([localOperation]);
+    expect(await store.getLastServerSeq('local-default-document')).toBe(4);
+    expect(await store.loadPendingOperations('local-default-document')).toEqual([localOperation]);
+    expect((await store.loadReplicaSnapshot('local-default-document'))?.knownOperationCount).toBe(
+      1,
+    );
+    expect(await store.loadServerBaseline('local-default-document')).toBeUndefined();
+    expect(await upgraded.serverBaselines.count()).toBe(0);
+
+    await upgraded.delete();
+  });
+
+  it('atomically installs a server baseline, suffix, cursor, and lamport without fabricating prefix rows', async () => {
+    const database = new LocalWorkspaceDatabase(uniqueDatabaseName('baseline-install'));
+    const store = new LocalDocumentStore(database, {
+      clientIdFactory: () => 'client-local',
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const initialized = await store.initialize();
+    expect(await store.isSnapshotBootstrapEligible(initialized.document.id)).toBe(true);
+
+    const prefix = [
+      createInsertOperation({
+        clientId: 'seed',
+        counter: 1,
+        lamport: 40,
+        afterId: ROOT_ID,
+        value: 'A',
+      }),
+      createInsertOperation({
+        clientId: 'seed',
+        counter: 2,
+        lamport: 41,
+        afterId: 'seed:1',
+        value: 'B',
+      }),
+    ];
+    const replica = new TextReplica();
+    replica.applyAll(prefix);
+    const suffix = createInsertOperation({
+      clientId: 'seed',
+      counter: 3,
+      lamport: 50,
+      afterId: prefix[1]!.opId,
+      value: 'C',
+    });
+
+    await store.saveReplicaSnapshot(initialized.document.id, replica.exportSnapshot(), 2);
+
+    const installed = await store.installServerBaseline(
+      initialized.document.id,
+      {
+        version: 1,
+        snapshotSeq: 2,
+        snapshot: replica.exportSnapshot(),
+      },
+      [{ serverSeq: 3, operation: suffix }],
+      3,
+    );
+
+    expect(installed.materialize()).toBe('ABC');
+    expect(await store.getLastServerSeq(initialized.document.id)).toBe(3);
+    expect(await store.loadOperations(initialized.document.id)).toEqual([suffix]);
+    expect(await store.loadServerBaseline(initialized.document.id)).toMatchObject({
+      snapshotSeq: 2,
+    });
+    expect(await store.loadReplicaSnapshot(initialized.document.id)).toBeUndefined();
+    expect((await store.readClientMeta()).lamportClock).toBe(50);
+    expect((await store.readClientMeta()).nextCounter).toBe(1);
+    expect(await store.isSnapshotBootstrapEligible(initialized.document.id)).toBe(false);
+
+    await database.delete();
+  });
+
+  it('rejects snapshot install when local operations, outbox, or a cursor already exist', async () => {
+    const database = new LocalWorkspaceDatabase(uniqueDatabaseName('baseline-ineligible'));
+    const store = new LocalDocumentStore(database, {
+      clientIdFactory: () => 'client-local',
+    });
+    const initialized = await store.initialize();
+    const emptyReplica = new TextReplica();
+    emptyReplica.apply(
+      createInsertOperation({
+        clientId: 'seed',
+        counter: 1,
+        lamport: 1,
+        afterId: ROOT_ID,
+        value: 'A',
+      }),
+    );
+    const validBootstrap = {
+      version: 1 as const,
+      snapshotSeq: 1,
+      snapshot: emptyReplica.exportSnapshot(),
+    };
+
+    await store.persistLocalTextEdit(initialized.document.id, {
+      deleteTargetIds: [],
+      insertAfterId: ROOT_ID,
+      insertValues: ['L'],
+    });
+    await expect(
+      store.installServerBaseline(initialized.document.id, validBootstrap, [], 1),
+    ).rejects.toBeInstanceOf(SnapshotBootstrapIneligibleError);
+    expect(await store.loadServerBaseline(initialized.document.id)).toBeUndefined();
+    expect(await store.loadOperations(initialized.document.id)).toHaveLength(1);
+
+    const cursorDatabase = new LocalWorkspaceDatabase(uniqueDatabaseName('baseline-cursor'));
+    const cursorStore = new LocalDocumentStore(cursorDatabase, {
+      clientIdFactory: () => 'client-cursor',
+    });
+    const cursorDoc = await cursorStore.initialize();
+    await cursorStore.persistServerOperations(
+      cursorDoc.document.id,
+      [
+        {
+          serverSeq: 2,
+          operation: createInsertOperation({
+            clientId: 'remote',
+            counter: 1,
+            lamport: 2,
+            afterId: ROOT_ID,
+            value: 'R',
+          }),
+        },
+      ],
+      2,
+    );
+    await expect(
+      cursorStore.installServerBaseline(cursorDoc.document.id, validBootstrap, [], 2),
+    ).rejects.toBeInstanceOf(SnapshotBootstrapIneligibleError);
+
+    await expect(
+      store.installServerBaseline(
+        initialized.document.id,
+        {
+          version: 1,
+          snapshotSeq: 1,
+          snapshot: { version: 1, nodes: [], deleteOperations: [] },
+        },
+        [{ serverSeq: 1, operation: prefixDummy() }],
+        1,
+      ),
+    ).rejects.toBeInstanceOf(InvalidSnapshotBootstrapError);
+
+    await database.delete();
+    await cursorDatabase.delete();
+  });
 });
+
+function prefixDummy() {
+  return createInsertOperation({
+    clientId: 'seed',
+    counter: 1,
+    lamport: 1,
+    afterId: ROOT_ID,
+    value: 'A',
+  });
+}

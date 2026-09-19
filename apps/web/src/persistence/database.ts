@@ -42,6 +42,13 @@ export interface ReplicaSnapshotRecord {
   readonly createdAt: string;
 }
 
+export interface ServerBaselineRecord {
+  readonly documentId: string;
+  readonly snapshotSeq: number;
+  readonly snapshot: TextReplicaSnapshot;
+  readonly createdAt: string;
+}
+
 export class LocalWorkspaceDatabase extends Dexie {
   readonly clientMeta!: Table<ClientMetaRecord, string>;
   readonly documents!: Table<DocumentRecord, string>;
@@ -49,6 +56,7 @@ export class LocalWorkspaceDatabase extends Dexie {
   readonly outbox!: Table<OutboxRecord, string>;
   readonly syncState!: Table<SyncStateRecord, string>;
   readonly replicaSnapshots!: Table<ReplicaSnapshotRecord, string>;
+  readonly serverBaselines!: Table<ServerBaselineRecord, string>;
 
   constructor(databaseName = 'lfcw-local-workspace') {
     super(databaseName);
@@ -78,6 +86,16 @@ export class LocalWorkspaceDatabase extends Dexie {
       outbox: '&opId, documentId, createdAt',
       syncState: '&documentId',
       replicaSnapshots: '&documentId, createdAt',
+    });
+
+    this.version(4).stores({
+      clientMeta: '&key',
+      documents: '&id, updatedAt',
+      operations: '&opId, documentId, createdAt',
+      outbox: '&opId, documentId, createdAt',
+      syncState: '&documentId',
+      replicaSnapshots: '&documentId, createdAt',
+      serverBaselines: '&documentId',
     });
   }
 }

@@ -3,6 +3,7 @@ import type { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import { DEFAULT_SERVER_CONFIG, type ServerConfig } from './config.js';
 import { ServerMetrics } from './observability/server-metrics.js';
 import { OperationStore } from './operation-store.js';
+import { ServerSnapshotManager } from './server-snapshot.js';
 import { attachSyncServer, type SyncServer, type SyncServerLogger } from './sync-server.js';
 
 export interface CreateAppOptions {
@@ -30,11 +31,18 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Created
   const app = Fastify({
     logger: options.logger ?? false,
   });
-  const syncServer: SyncServer = attachSyncServer(app, store, {
-    config,
-    metrics,
-    logger: options.syncLogger ?? asSyncLogger(app.log),
-  });
+  const syncLogger = options.syncLogger ?? asSyncLogger(app.log);
+  const snapshots = new ServerSnapshotManager(store, metrics, syncLogger);
+  const syncServer: SyncServer = attachSyncServer(
+    app,
+    store,
+    {
+      config,
+      metrics,
+      logger: syncLogger,
+    },
+    snapshots,
+  );
 
   app.get('/health', async () => ({
     status: 'ok',

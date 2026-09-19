@@ -18,7 +18,7 @@ The editor UI is the product surface. The synchronization engine is the primary 
 
 ## Current Status
 
-Milestone 6 — Single-node production hardening, observability, repeatable deployment, and core CI.
+Milestone 8 — Server snapshot bootstrap for eligible fresh clients, with full server history retained.
 
 This is a production-hardened **single-node** deployment. It is not a production-ready SaaS, is not horizontally scalable, and is not authenticated.
 
@@ -32,9 +32,13 @@ Local operations are written atomically to the operation log and a durable outbo
 
 When the socket drops, the client automatically reconnects on a deterministic schedule (250ms, 500ms, 1s, 2s, then 4s). Reconnect joins with the persisted cursor, incrementally downloads missing SQLite history through a fixed barrier, then uploads remaining outbox operations. Sender echoes and reconnect replay both acknowledge outbox rows. Page reload does not lose unsent local operations.
 
-Local cold-start can restore a complete `TextReplica` checkpoint from IndexedDB, then still reapply the full canonical operation log. Checkpoints accelerate reconstruction. They do not replace the operation log, delete historical rows, or garbage-collect tombstones. A missing, stale, or corrupt checkpoint falls back to full replay. Fresh clients still bootstrap from server operation history. The common sequential-insert replay path no longer walks every ancestor chain to `ROOT`.
+Local cold-start can restore a complete `TextReplica` checkpoint from IndexedDB, then still reapply the full canonical operation log. Checkpoints accelerate reconstruction. They do not replace the operation log, delete historical rows, or garbage-collect tombstones. A missing, stale, or corrupt checkpoint falls back to full replay. The common sequential-insert replay path no longer walks every ancestor chain to `ROOT`.
 
-The Fastify server still uses a global SQLite `server_seq` AUTOINCREMENT log. Gaps from other documents are not treated as missing operations for this document. The server does not store snapshots. SQLite journal mode is unchanged (library default rollback journal; WAL is not enabled).
+Documents that installed a **server baseline snapshot** reconstruct from that authoritative baseline plus local/server suffix rows instead. That baseline is not an M4 cache. Baseline documents currently skip M4 local checkpoints. Prefix operations with `server_seq <= snapshotSeq` are intentionally not stored in the browser operations table.
+
+The Fastify server still uses a global SQLite `server_seq` AUTOINCREMENT log. Gaps from other documents are not treated as missing operations for this document. SQLite schema versioning uses `PRAGMA user_version` (currently 2). `server_snapshots` is a derived cache of `TextReplicaSnapshotV1` at a fixed document barrier. **Complete operation history remains in `operations`.** Snapshots are not compaction, do not delete rows, and do not garbage-collect tombstones. A snapshot can be rebuilt from the operation log. Snapshot JSON remains O(history); outbound bootstrap payloads can still be large. Chunking/backpressure is unsolved.
+
+Eligible clients advertise `snapshot-bootstrap-v1` only when `lastServerSeq == 0` and the opened document is locally pristine (no baseline, operations, or outbox). The server sends snapshot + post-snapshot suffix only to those clients, and only when document history has at least 1000 operations. M7 / non-capable clients and any client with `lastServerSeq > 0` receive ordinary full/incremental operation history. If snapshot build or install fails, the client falls back to full-history sync. SQLite journal mode is unchanged (library default rollback journal; WAL is not enabled).
 
 The server now validates runtime configuration at startup, bounds inbound WebSocket frames and protocol string sizes, optionally allowlists browser Origins, heartbeats idle sockets, exposes `/ready` and process-local `/metrics`, logs structured WebSocket lifecycle events, and shuts down on SIGINT/SIGTERM. Docker Compose runs exactly one server replica with a named `/data` volume. GitHub Actions runs format/lint/typecheck/test/build on Node 24.13.0, then a Chromium Playwright reliability gate.
 
@@ -48,13 +52,13 @@ Remaining limitations:
 - metrics are process-local and reset on restart
 - no rate limiting
 - no full outbound sync chunking/backpressure system
-- fresh client receives full server history
-- no server snapshot/compaction
+- snapshot and full-history `sync` payloads can still be huge
 - no automated backup
 - Chromium-only Playwright gate; not Firefox/WebKit and not every manual disaster scenario
 - same-origin normal tabs still share one local replica and client identity
 - no service-worker / PWA offline shell
 - no destructive operation compaction or tombstone garbage collection
+- no snapshot rebase for behind / non-empty clients
 - no server-side document registry
 - no collaborative titles, document deletion, authentication, or presence
 - empty and never-created server documents are indistinguishable
@@ -63,7 +67,7 @@ Remaining limitations:
 ## Planned Architecture
 
 - React + Vite browser application
-- IndexedDB + Dexie local persistence (v3: operations, outbox, syncState, replicaSnapshots)
+- IndexedDB + Dexie local persistence (v4: operations, outbox, syncState, replicaSnapshots, serverBaselines)
 - custom RGA-inspired collaborative text CRDT
 - explicit WebSocket synchronization protocol (`@lfcw/protocol`)
 - Fastify Node server with a `/sync` WebSocket endpoint

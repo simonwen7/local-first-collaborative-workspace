@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ROOT_ID, createInsertOperation } from '@lfcw/crdt';
+import { SNAPSHOT_BOOTSTRAP_CAPABILITY } from '@lfcw/protocol';
+import {
+  InvalidSnapshotBootstrapError,
+  SnapshotBootstrapIneligibleError,
+} from '../src/persistence/local-document-store';
 import { DocumentSyncClient } from '../src/sync/document-sync-client';
 import type { SyncStatus } from '../src/sync/document-sync-client';
 
@@ -370,5 +375,197 @@ describe('DocumentSyncClient', () => {
       ),
     ).toHaveLength(1);
     expect(client).not.toHaveProperty('startupQueue');
+  });
+
+  it('advertises snapshot bootstrap only for a pristine cursor-0 document', async () => {
+    const capable = createClient({
+      getLastServerSeq: async () => 0,
+      isSnapshotBootstrapEligible: async () => true,
+    });
+    capable.connect();
+    lastSocket().open();
+    await flush(capable);
+    expect(lastSocket().sent[0]).toEqual({
+      type: 'join',
+      documentId: 'local-default-document',
+      clientId: 'client-a',
+      lastServerSeq: 0,
+      capabilities: [SNAPSHOT_BOOTSTRAP_CAPABILITY],
+    });
+
+    const behind = createClient({
+      getLastServerSeq: async () => 4,
+      isSnapshotBootstrapEligible: async () => true,
+    });
+    behind.connect();
+    lastSocket().open();
+    await flush(behind);
+    expect(lastSocket().sent[0]).not.toHaveProperty('capabilities');
+  });
+
+  it('installs a snapshot bootstrap sync and still accepts operations-only sync', async () => {
+    const bootstraps: unknown[] = [];
+    const operationsIngests: number[] = [];
+    const snapshot = { version: 1, nodes: [], deleteOperations: [] };
+
+    const client = createClient({
+      getLastServerSeq: async () => 0,
+      isSnapshotBootstrapEligible: async () => true,
+      onSnapshotBootstrap: async (bootstrap, operations, latest) => {
+        bootstraps.push({ bootstrap, operations, latest });
+      },
+      onServerOperations: async (_operations, confirmed) => {
+        operationsIngests.push(confirmed);
+      },
+    });
+
+    client.connect();
+    lastSocket().open();
+    await flush(client);
+    lastSocket().emitMessage({
+      type: 'sync',
+      documentId: 'local-default-document',
+      operations: [
+        {
+          serverSeq: 5,
+          operation: pendingOp,
+        },
+      ],
+      latestServerSeq: 5,
+      snapshotBootstrap: {
+        version: 1,
+        snapshotSeq: 4,
+        snapshot,
+      },
+    });
+    await flush(client);
+    expect(bootstraps).toHaveLength(1);
+    expect(operationsIngests).toEqual([]);
+    expect(client.getStatus()).toBe('online');
+    client.close();
+
+    const legacy = createClient({
+      getLastServerSeq: async () => 0,
+      onServerOperations: async (_operations, confirmed) => {
+        operationsIngests.push(confirmed);
+      },
+    });
+    legacy.connect();
+    lastSocket().open();
+    await flush(legacy);
+    lastSocket().emitMessage({
+      type: 'sync',
+      documentId: 'local-default-document',
+      operations: [],
+      latestServerSeq: 0,
+    });
+    await flush(legacy);
+    expect(operationsIngests).toEqual([0]);
+  });
+
+  it('reconnects without snapshot capability after a local-edit race rejects install', async () => {
+    let eligible = true;
+    const pending = [pendingOp];
+    const ingested: number[] = [];
+
+    const client = createClient({
+      getLastServerSeq: async () => 0,
+      isSnapshotBootstrapEligible: async () => eligible,
+      loadPendingOperations: async () => pending,
+      onSnapshotBootstrap: async () => {
+        throw new SnapshotBootstrapIneligibleError('local edit');
+      },
+      onServerOperations: async (_operations, confirmed) => {
+        ingested.push(confirmed);
+      },
+    });
+
+    client.connect();
+    lastSocket().open();
+    await flush(client);
+    expect(lastSocket().sent[0]).toMatchObject({
+      capabilities: [SNAPSHOT_BOOTSTRAP_CAPABILITY],
+    });
+
+    eligible = false;
+    lastSocket().emitMessage({
+      type: 'sync',
+      documentId: 'local-default-document',
+      operations: [],
+      latestServerSeq: 4,
+      snapshotBootstrap: {
+        version: 1,
+        snapshotSeq: 4,
+        snapshot: { version: 1, nodes: [], deleteOperations: [] },
+      },
+    });
+    await flush(client);
+
+    await vi.advanceTimersByTimeAsync(250);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    lastSocket().open();
+    await flush(client);
+    expect(lastSocket().sent[0]).toEqual({
+      type: 'join',
+      documentId: 'local-default-document',
+      clientId: 'client-a',
+      lastServerSeq: 0,
+    });
+
+    lastSocket().emitMessage({
+      type: 'sync',
+      documentId: 'local-default-document',
+      operations: [],
+      latestServerSeq: 1,
+    });
+    await flush(client);
+    expect(ingested).toEqual([1]);
+    expect(
+      lastSocket().sent.some(
+        (message) => (message as { type?: string }).type === 'submit-operation',
+      ),
+    ).toBe(true);
+  });
+
+  it('falls back once for a malformed snapshot and does not loop', async () => {
+    const client = createClient({
+      getLastServerSeq: async () => 0,
+      isSnapshotBootstrapEligible: async () => true,
+      onSnapshotBootstrap: async () => {
+        throw new InvalidSnapshotBootstrapError('corrupt');
+      },
+    });
+
+    client.connect();
+    lastSocket().open();
+    await flush(client);
+    lastSocket().emitMessage({
+      type: 'sync',
+      documentId: 'local-default-document',
+      operations: [],
+      latestServerSeq: 1,
+      snapshotBootstrap: {
+        version: 1,
+        snapshotSeq: 1,
+        snapshot: { version: 1, nodes: [], deleteOperations: [] },
+      },
+    });
+    await flush(client);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    lastSocket().open();
+    await flush(client);
+    expect(lastSocket().sent[0]).not.toHaveProperty('capabilities');
+
+    lastSocket().emitMessage({
+      type: 'sync',
+      documentId: 'local-default-document',
+      operations: [],
+      latestServerSeq: 0,
+    });
+    await flush(client);
+    expect(client.getStatus()).toBe('online');
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(FakeWebSocket.instances).toHaveLength(2);
   });
 });

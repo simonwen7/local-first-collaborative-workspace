@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { ROOT_ID, createInsertOperation, OperationIdentityConflictError } from '@lfcw/crdt';
-import { OperationStore } from '../src/operation-store.js';
+import Database from 'better-sqlite3';
+import { IncompatibleServerSchemaError, OperationStore } from '../src/operation-store.js';
 
 const firstInsert = createInsertOperation({
   clientId: 'client-a',
@@ -153,5 +154,63 @@ describe('OperationStore', () => {
       reopened.close();
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it('migrates a brand-new database to user_version 2 with an empty snapshot table', () => {
+    const store = new OperationStore(':memory:');
+    stores.push(store);
+
+    expect(store.getSchemaVersion()).toBe(2);
+    expect(store.loadSnapshotRow('doc-a')).toBeUndefined();
+    expect(store.loadOperations('doc-a')).toEqual([]);
+  });
+
+  it('migrates an existing M7-style operations database without losing rows', () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'lfcw-migrate-'));
+    const databasePath = path.join(directory, 'lfcw.sqlite');
+    const legacy = new Database(databasePath);
+    legacy.exec(`
+      CREATE TABLE IF NOT EXISTS operations (
+        server_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        document_id TEXT NOT NULL,
+        op_id TEXT NOT NULL,
+        operation_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        UNIQUE (document_id, op_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_operations_document_seq
+        ON operations (document_id, server_seq);
+    `);
+    legacy
+      .prepare(
+        `INSERT INTO operations (document_id, op_id, operation_json, created_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run('doc-a', firstInsert.opId, JSON.stringify(firstInsert), Date.now());
+    expect(Number(legacy.pragma('user_version', { simple: true }))).toBe(0);
+    legacy.close();
+
+    const store = new OperationStore(databasePath);
+
+    try {
+      expect(store.getSchemaVersion()).toBe(2);
+      expect(store.loadOperations('doc-a')).toEqual([{ serverSeq: 1, operation: firstInsert }]);
+      expect(store.loadSnapshotRow('doc-a')).toBeUndefined();
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses to open a database newer than the supported schema version', () => {
+    const directory = mkdtempSync(path.join(tmpdir(), 'lfcw-future-'));
+    const databasePath = path.join(directory, 'lfcw.sqlite');
+    const future = new Database(databasePath);
+    future.pragma('user_version = 99');
+    future.close();
+
+    expect(() => new OperationStore(databasePath)).toThrow(IncompatibleServerSchemaError);
+
+    rmSync(directory, { recursive: true, force: true });
   });
 });
