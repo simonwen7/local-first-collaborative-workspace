@@ -25,6 +25,8 @@ The system is divided into four primary boundaries:
 
 3. `apps/web`
    - React product UI.
+   - Local multi-document workspace.
+   - Query-string document routing.
    - Local replica ownership.
    - IndexedDB persistence.
    - Editor/controller translation.

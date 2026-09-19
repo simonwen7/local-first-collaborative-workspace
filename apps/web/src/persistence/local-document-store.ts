@@ -19,7 +19,7 @@ import type {
 
 export const DEFAULT_DOCUMENT_ID = 'local-default-document';
 
-const DEFAULT_DOCUMENT_TITLE = 'Local Document';
+export const DEFAULT_DOCUMENT_TITLE = 'Local Document';
 
 export interface LocalDocumentStoreOptions {
   readonly clientIdFactory?: () => string;
@@ -61,7 +61,12 @@ export class LocalDocumentStore {
     this.now = options.now ?? (() => new Date().toISOString());
   }
 
-  async initialize(): Promise<InitializedLocalDocument> {
+  async initialize(
+    documentId: string = DEFAULT_DOCUMENT_ID,
+    defaultTitle: string = documentId === DEFAULT_DOCUMENT_ID
+      ? DEFAULT_DOCUMENT_TITLE
+      : 'Untitled Document',
+  ): Promise<InitializedLocalDocument> {
     return this.database.transaction(
       'rw',
       this.database.clientMeta,
@@ -81,14 +86,14 @@ export class LocalDocumentStore {
           await this.database.clientMeta.add(clientMeta);
         }
 
-        let document = await this.database.documents.get(DEFAULT_DOCUMENT_ID);
+        let document = await this.database.documents.get(documentId);
 
         if (!document) {
           const timestamp = this.now();
 
           document = {
-            id: DEFAULT_DOCUMENT_ID,
-            title: DEFAULT_DOCUMENT_TITLE,
+            id: documentId,
+            title: defaultTitle,
             createdAt: timestamp,
             updatedAt: timestamp,
           };
@@ -130,6 +135,10 @@ export class LocalDocumentStore {
         throw new Error(
           `Outbox marker "${marker.opId}" is missing its canonical operation record.`,
         );
+      }
+
+      if (record.documentId !== documentId || marker.documentId !== documentId) {
+        throw new OperationIdentityConflictError(marker.opId);
       }
 
       operations.push(record.operation);
@@ -304,6 +313,10 @@ export class LocalDocumentStore {
 
           const existing = await this.database.operations.get(operation.opId);
 
+          if (existing && existing.documentId !== documentId) {
+            throw new OperationIdentityConflictError(operation.opId);
+          }
+
           if (!existing) {
             const record: OperationRecord = {
               opId: operation.opId,
@@ -321,6 +334,10 @@ export class LocalDocumentStore {
           const outboxRow = await this.database.outbox.get(operation.opId);
 
           if (outboxRow) {
+            if (outboxRow.documentId !== documentId) {
+              throw new OperationIdentityConflictError(operation.opId);
+            }
+
             const canonical = existing ?? { operation };
 
             if (!operationsEqual(canonical.operation, operation)) {

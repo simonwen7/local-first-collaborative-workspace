@@ -3,9 +3,20 @@ import type { TextOperation, TextReplicaSnapshot, VisibleElement } from '@lfcw/c
 import type { SequencedOperation } from '@lfcw/protocol';
 import { computeLocalTextEdit } from '../editor/text-edit';
 import { LocalWorkspaceDatabase } from '../persistence/database';
-import { LocalDocumentStore } from '../persistence/local-document-store';
+import {
+  DEFAULT_DOCUMENT_ID,
+  DEFAULT_DOCUMENT_TITLE,
+  LocalDocumentStore,
+} from '../persistence/local-document-store';
 import type { LocalDocumentStoreOptions } from '../persistence/local-document-store';
 import type { ReplicaSnapshotRecord } from '../persistence/database';
+
+export class ControllerClosedError extends Error {
+  constructor() {
+    super('Local document controller is closed.');
+    this.name = 'ControllerClosedError';
+  }
+}
 
 export const SNAPSHOT_OPERATION_INTERVAL = 1000;
 
@@ -28,6 +39,8 @@ export interface LocalEditResult {
 
 export interface LocalDocumentControllerOptions extends LocalDocumentStoreOptions {
   readonly databaseName?: string;
+  readonly documentId?: string;
+  readonly defaultTitle?: string;
   readonly snapshotInterval?: number;
   readonly persistCheckpoint?: (
     documentId: string,
@@ -39,6 +52,8 @@ export interface LocalDocumentControllerOptions extends LocalDocumentStoreOption
 export class LocalDocumentController {
   private writeQueue: Promise<void> = Promise.resolve();
   private lastSnapshotOperationCount = 0;
+  private closing = false;
+  private closePromise: Promise<void> | null = null;
 
   private constructor(
     private readonly store: LocalDocumentStore,
@@ -58,6 +73,10 @@ export class LocalDocumentController {
     options: LocalDocumentControllerOptions = {},
   ): Promise<LocalDocumentController> {
     const snapshotInterval = resolveSnapshotInterval(options.snapshotInterval);
+    const documentId = options.documentId ?? DEFAULT_DOCUMENT_ID;
+    const defaultTitle =
+      options.defaultTitle ??
+      (documentId === DEFAULT_DOCUMENT_ID ? DEFAULT_DOCUMENT_TITLE : 'Untitled Document');
     const database = new LocalWorkspaceDatabase(options.databaseName);
 
     const store = new LocalDocumentStore(database, {
@@ -67,7 +86,7 @@ export class LocalDocumentController {
       ...(options.now !== undefined ? { now: options.now } : {}),
     });
 
-    const initialized = await store.initialize();
+    const initialized = await store.initialize(documentId, defaultTitle);
     const operations = await store.loadOperations(initialized.document.id);
     const checkpoint = await store.loadReplicaSnapshot(initialized.document.id);
     const persistCheckpoint =
@@ -126,6 +145,10 @@ export class LocalDocumentController {
   }
 
   replaceText(nextText: string): Promise<LocalEditResult> {
+    if (this.closing) {
+      return Promise.reject(new ControllerClosedError());
+    }
+
     const result = this.writeQueue.then(() => this.replaceTextNow(nextText));
 
     this.writeQueue = result.then(
@@ -140,6 +163,10 @@ export class LocalDocumentController {
     sequencedOperations: readonly SequencedOperation[],
     confirmedThroughServerSeq: number,
   ): Promise<LocalDocumentSnapshot> {
+    if (this.closing) {
+      return Promise.reject(new ControllerClosedError());
+    }
+
     const result = this.writeQueue.then(() =>
       this.applyServerOperationsNow(sequencedOperations, confirmedThroughServerSeq),
     );
@@ -152,8 +179,26 @@ export class LocalDocumentController {
     return result;
   }
 
-  close(): void {
-    this.store.close();
+  whenIdle(): Promise<void> {
+    return this.writeQueue;
+  }
+
+  async close(): Promise<void> {
+    if (this.closePromise) {
+      return this.closePromise;
+    }
+
+    this.closing = true;
+    this.closePromise = this.finalizeClose();
+    return this.closePromise;
+  }
+
+  private async finalizeClose(): Promise<void> {
+    try {
+      await this.writeQueue;
+    } finally {
+      this.store.close();
+    }
   }
 
   private async replaceTextNow(nextText: string): Promise<LocalEditResult> {

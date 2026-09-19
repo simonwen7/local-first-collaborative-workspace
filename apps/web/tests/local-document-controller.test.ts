@@ -29,7 +29,7 @@ describe('LocalDocumentController', () => {
     expect(firstEdit.operations.length).toBeGreaterThan(0);
     expect(first.getSnapshot().text).toBe('协作👨‍👩‍👧‍👦');
 
-    first.close();
+    await first.close();
 
     const reopened = await LocalDocumentController.create({
       databaseName,
@@ -43,7 +43,7 @@ describe('LocalDocumentController', () => {
 
     expect(reopened.getSnapshot().text).toBe('协作👨‍👩‍👧‍👦!');
 
-    reopened.close();
+    await reopened.close();
 
     const cleanupDatabase = new LocalWorkspaceDatabase(databaseName);
 
@@ -69,7 +69,7 @@ describe('LocalDocumentController', () => {
 
     expect(controller.getSnapshot().text).toBe('Hello');
 
-    controller.close();
+    await controller.close();
 
     const reopened = await LocalDocumentController.create({
       databaseName,
@@ -77,7 +77,7 @@ describe('LocalDocumentController', () => {
 
     expect(reopened.getSnapshot().text).toBe('Hello');
 
-    reopened.close();
+    await reopened.close();
 
     const cleanupDatabase = new LocalWorkspaceDatabase(databaseName);
 
@@ -98,7 +98,7 @@ describe('LocalDocumentController', () => {
 
     expect(controller.getSnapshot().text).toBe('AC');
 
-    controller.close();
+    await controller.close();
 
     const cleanupDatabase = new LocalWorkspaceDatabase(databaseName);
 
@@ -144,7 +144,7 @@ describe('LocalDocumentController', () => {
     expect(localEdit.operations[0]?.clientId).toBe('client-local');
     expect(await controller.loadPendingOperations()).toEqual(localEdit.operations);
 
-    controller.close();
+    await controller.close();
 
     const cleanupDatabase = new LocalWorkspaceDatabase(databaseName);
 
@@ -168,7 +168,7 @@ describe('LocalDocumentController', () => {
       clientIdFactory: () => 'client-a',
     });
     await first.replaceText('Hi');
-    first.close();
+    await first.close();
 
     const database = new LocalWorkspaceDatabase(databaseName);
     const store = new LocalDocumentStore(database);
@@ -177,7 +177,7 @@ describe('LocalDocumentController', () => {
 
     const reopened = await LocalDocumentController.create({ databaseName });
     expect(reopened.getSnapshot().text).toBe('Hi');
-    reopened.close();
+    await reopened.close();
     await database.delete();
   });
 
@@ -189,7 +189,7 @@ describe('LocalDocumentController', () => {
       snapshotInterval: 1,
     });
     await first.replaceText('AB');
-    first.close();
+    await first.close();
 
     const database = new LocalWorkspaceDatabase(databaseName);
     const store = new LocalDocumentStore(database);
@@ -203,7 +203,7 @@ describe('LocalDocumentController', () => {
     expect(reopened.getSnapshot().visibleElements.map((element) => element.id)).toEqual(
       operations.map((operation) => operation.opId),
     );
-    reopened.close();
+    await reopened.close();
     await database.delete();
   });
 
@@ -216,7 +216,7 @@ describe('LocalDocumentController', () => {
     });
     await first.replaceText('AB');
     await first.replaceText('ABC');
-    first.close();
+    await first.close();
 
     const database = new LocalWorkspaceDatabase(databaseName);
     const store = new LocalDocumentStore(database);
@@ -225,7 +225,7 @@ describe('LocalDocumentController', () => {
 
     const reopened = await LocalDocumentController.create({ databaseName });
     expect(reopened.getSnapshot().text).toBe('ABC');
-    reopened.close();
+    await reopened.close();
     await database.delete();
   });
 
@@ -236,7 +236,7 @@ describe('LocalDocumentController', () => {
       clientIdFactory: () => 'client-a',
     });
     await first.replaceText('A');
-    first.close();
+    await first.close();
 
     const extra = createInsertOperation({
       clientId: 'ghost',
@@ -264,7 +264,7 @@ describe('LocalDocumentController', () => {
 
     const reopened = await LocalDocumentController.create({ databaseName });
     expect(reopened.getSnapshot().text).toBe('A');
-    reopened.close();
+    await reopened.close();
     await database.delete();
   });
 
@@ -275,7 +275,7 @@ describe('LocalDocumentController', () => {
       clientIdFactory: () => 'client-a',
     });
     await first.replaceText('A');
-    first.close();
+    await first.close();
 
     const conflicting = new TextReplica();
     conflicting.apply(
@@ -295,7 +295,7 @@ describe('LocalDocumentController', () => {
 
     const reopened = await LocalDocumentController.create({ databaseName });
     expect(reopened.getSnapshot().text).toBe('A');
-    reopened.close();
+    await reopened.close();
     await database.delete();
   });
 
@@ -305,7 +305,7 @@ describe('LocalDocumentController', () => {
       databaseName,
       clientIdFactory: () => 'client-a',
     });
-    first.close();
+    await first.close();
 
     const database = new LocalWorkspaceDatabase(databaseName);
     await database.open();
@@ -386,7 +386,7 @@ describe('LocalDocumentController', () => {
     expect(controller.getSnapshot().text).toBe('L');
     expect(await controller.loadPendingOperations()).toEqual([localOperation]);
     expect(await controller.getLastServerSeq()).toBe(0);
-    controller.close();
+    await controller.close();
 
     const database = new LocalWorkspaceDatabase(databaseName);
     const store = new LocalDocumentStore(database);
@@ -419,7 +419,7 @@ describe('LocalDocumentController', () => {
     await controller.replaceText('ABCDEF');
     expect((await store.loadReplicaSnapshot(DEFAULT_DOCUMENT_ID))?.knownOperationCount).toBe(6);
 
-    controller.close();
+    await controller.close();
     store.close();
     await database.delete();
   });
@@ -466,7 +466,7 @@ describe('LocalDocumentController', () => {
     expect((await store.loadReplicaSnapshot(DEFAULT_DOCUMENT_ID))?.knownOperationCount).toBe(3);
     expect(await store.getLastServerSeq(DEFAULT_DOCUMENT_ID)).toBe(2);
 
-    controller.close();
+    await controller.close();
     store.close();
     await database.delete();
   });
@@ -502,7 +502,7 @@ describe('LocalDocumentController', () => {
     expect(checkpointAttempts).toBe(0);
     expect(controller.getSnapshot().text).toBe('');
 
-    controller.close();
+    await controller.close();
     await new LocalWorkspaceDatabase(databaseName).delete();
   });
 
@@ -532,7 +532,7 @@ describe('LocalDocumentController', () => {
     expect(second.snapshot.text).toBe('AB');
     expect(saved).toEqual([2]);
 
-    controller.close();
+    await controller.close();
     await new LocalWorkspaceDatabase(databaseName).delete();
   });
 
@@ -547,13 +547,57 @@ describe('LocalDocumentController', () => {
     const edit = await controller.replaceText('A');
     expect(await controller.loadPendingOperations()).toEqual(edit.operations);
 
-    controller.close();
+    await controller.close();
 
     const reopened = await LocalDocumentController.create({ databaseName });
     expect(await reopened.loadPendingOperations()).toEqual(edit.operations);
     expect(reopened.getSnapshot().text).toBe('A');
-    reopened.close();
+    await reopened.close();
 
+    await new LocalWorkspaceDatabase(databaseName).delete();
+  });
+
+  it('creates isolated controllers and closes them after queued writes settle', async () => {
+    const databaseName = uniqueDatabaseName('lifecycle');
+    const documentA = crypto.randomUUID();
+    const documentB = crypto.randomUUID();
+
+    const controllerA = await LocalDocumentController.create({
+      databaseName,
+      documentId: documentA,
+      clientIdFactory: () => 'client-shared',
+      snapshotInterval: 1,
+    });
+    const controllerB = await LocalDocumentController.create({
+      databaseName,
+      documentId: documentB,
+      clientIdFactory: () => 'should-not-replace',
+    });
+
+    const writeA = controllerA.replaceText('AAA');
+    const idle = controllerA.whenIdle();
+    await writeA;
+    await idle;
+    const queued = controllerA.replaceText('AAAA');
+    const closing = controllerA.close();
+    await queued;
+    await closing;
+    expect(controllerA.getSnapshot().text).toBe('AAAA');
+    expect(controllerB.getSnapshot().text).toBe('');
+
+    await controllerA.close();
+    await expect(controllerA.replaceText('Z')).rejects.toMatchObject({
+      name: 'ControllerClosedError',
+    });
+
+    await controllerB.replaceText('B');
+    expect(controllerB.getSnapshot().text).toBe('B');
+    await controllerB.close();
+
+    const store = new LocalDocumentStore(new LocalWorkspaceDatabase(databaseName));
+    expect((await store.loadReplicaSnapshot(documentA))?.knownOperationCount).toBe(4);
+    expect(await store.loadReplicaSnapshot(documentB)).toBeUndefined();
+    store.close();
     await new LocalWorkspaceDatabase(databaseName).delete();
   });
 });

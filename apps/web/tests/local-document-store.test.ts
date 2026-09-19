@@ -422,4 +422,82 @@ describe('LocalDocumentStore', () => {
 
     await database.delete();
   });
+
+  it('isolates operations, outbox, cursors, and checkpoints across two documents', async () => {
+    const database = new LocalWorkspaceDatabase(uniqueDatabaseName('multi-doc'));
+    const store = new LocalDocumentStore(database, {
+      clientIdFactory: () => 'client-shared',
+    });
+    const documentA = crypto.randomUUID();
+    const documentB = crypto.randomUUID();
+    await store.initialize(documentA, 'Untitled Document');
+    await store.initialize(documentB, 'Untitled Document');
+
+    const opsA = await store.persistLocalTextEdit(documentA, {
+      deleteTargetIds: [],
+      insertAfterId: ROOT_ID,
+      insertValues: ['A'],
+    });
+    const opsB = await store.persistLocalTextEdit(documentB, {
+      deleteTargetIds: [],
+      insertAfterId: ROOT_ID,
+      insertValues: ['B'],
+    });
+
+    expect(opsA[0]?.opId).not.toBe(opsB[0]?.opId);
+    expect(await store.loadOperations(documentA)).toEqual(opsA);
+    expect(await store.loadOperations(documentB)).toEqual(opsB);
+    expect(await store.loadPendingOperations(documentA)).toEqual(opsA);
+    expect(await store.loadPendingOperations(documentB)).toEqual(opsB);
+
+    await store.persistServerOperations(documentA, [{ serverSeq: 3, operation: opsA[0]! }], 3);
+    expect(await store.getLastServerSeq(documentA)).toBe(3);
+    expect(await store.getLastServerSeq(documentB)).toBe(0);
+    expect(await store.loadPendingOperations(documentA)).toEqual([]);
+    expect(await store.loadPendingOperations(documentB)).toEqual(opsB);
+
+    const replicaA = new TextReplica();
+    replicaA.applyAll(opsA);
+    await store.saveReplicaSnapshot(documentA, replicaA.exportSnapshot(), 1);
+    expect((await store.loadReplicaSnapshot(documentA))?.knownOperationCount).toBe(1);
+    expect(await store.loadReplicaSnapshot(documentB)).toBeUndefined();
+
+    const meta = await store.readClientMeta();
+    expect(meta.clientId).toBe('client-shared');
+    expect(meta.nextCounter).toBe(3);
+
+    await store.database.operations.put({
+      opId: 'foreign:1',
+      documentId: documentA,
+      operation: createInsertOperation({
+        clientId: 'foreign',
+        counter: 1,
+        lamport: 1,
+        afterId: ROOT_ID,
+        value: 'X',
+      }),
+      createdAt: '2026-01-01T00:00:00.000Z',
+    });
+    await expect(
+      store.persistServerOperations(
+        documentB,
+        [
+          {
+            serverSeq: 8,
+            operation: createInsertOperation({
+              clientId: 'foreign',
+              counter: 1,
+              lamport: 1,
+              afterId: ROOT_ID,
+              value: 'X',
+            }),
+          },
+        ],
+        8,
+      ),
+    ).rejects.toBeInstanceOf(OperationIdentityConflictError);
+    expect(await store.getLastServerSeq(documentB)).toBe(0);
+
+    await database.delete();
+  });
 });

@@ -18,9 +18,13 @@ The editor UI is the product surface. The synchronization engine is the primary 
 
 ## Current Status
 
-Milestone 4 — Client CRDT checkpoints and sequential replay hardening.
+Milestone 5 — Multi-document local workspace and shareable document URLs.
 
-The browser remains local-first. Documents load from IndexedDB. Local edits continue and are saved even when the collaboration server is unavailable.
+The browser remains local-first. The workspace lists locally known documents, creates new UUID documents, and opens a document from `/?document=<documentId>`. Titles and rename are local-only metadata. There is no document deletion in this milestone.
+
+Only one document session is active at a time. Switching closes the current sync socket and controller before opening the next. An inactive document’s durable outbox stays on disk and is flushed only when that document is opened again.
+
+A valid unknown UUID opens as an empty local document and joins the server normally. The server still cannot distinguish a valid empty document from a never-created id. Sharing is unauthenticated: anyone with the document id or link can join that document.
 
 Local operations are written atomically to the operation log and a durable outbox. Each document persists a `lastServerSeq` cursor meaning: every server operation for this document with `server_seq <= lastServerSeq` has been durably processed.
 
@@ -36,8 +40,10 @@ Remaining limitations:
 
 - no service-worker / PWA offline shell
 - no destructive operation compaction or tombstone garbage collection
-- no server-side snapshots
-- no authentication, presence, or rich text
+- no server-side snapshots or document registry
+- no collaborative titles, document deletion, authentication, or presence
+- empty and never-created server documents are indistinguishable
+- sharing is not access-controlled
 - a server history reset that leaves a client cursor ahead of SQLite requires intervention (`sync-cursor-ahead`)
 - same-origin normal tabs still share one local replica and client identity
 

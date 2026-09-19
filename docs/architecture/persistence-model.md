@@ -2,7 +2,7 @@
 
 ## Status
 
-Implemented through Milestone 4 for the local-first operation log, outbox, per-document sync cursor, and client CRDT checkpoint cache.
+Implemented through Milestone 5 for the local-first operation log, local workspace document catalog, outbox, per-document sync cursor, and client CRDT checkpoint cache.
 
 ## Client Persistence
 
@@ -11,7 +11,7 @@ The browser uses IndexedDB through Dexie (`lfcw-local-workspace`, version 3).
 Current stores:
 
 - `clientMeta` — stable `clientId`, `nextCounter`, `lamportClock`
-- `documents`
+- `documents` — local workspace catalog (`id`, `title`, `createdAt`, `updatedAt`). Titles are local-only and are not synchronized.
 - `operations` — canonical CRDT operation log (`opId` primary key; no `serverSeq` / ack / origin fields)
 - `outbox` — `{ opId, documentId, createdAt }` markers for unacknowledged local operations
 - `syncState` — `{ documentId, lastServerSeq }`
@@ -86,6 +86,14 @@ A checkpoint stores a version-1 `TextReplica` snapshot plus the known-operation 
 A snapshot does not replace the operation log as the collaboration truth. The complete canonical operation log is retained in IndexedDB and SQLite. Milestone 4 does not implement destructive operation compaction, tombstone garbage collection, or server-side snapshots.
 
 After a trusted checkpoint restore, the controller still reapplies the complete canonical operation log. Operations already represented by the checkpoint become idempotent identity checks. Later suffix operations apply normally. If the checkpoint cannot be trusted, startup discards it in memory and rebuilds only from the canonical log.
+
+## Local workspace
+
+The `documents` table is the local workspace catalog. New documents use `crypto.randomUUID()`. The browser opens `/?document=<documentId>`. Missing routes canonicalize to `local-default-document`.
+
+A browser replica keeps one global `clientId` and counter stream so local `opId` values stay unique across documents. Only one document session is connected at a time. An inactive document’s outbox remains durable and is flushed when that document is reopened.
+
+Titles are local metadata. Rename updates `DocumentRecord.title` only. Collaborators may store different titles for the same shared id. The server still has no document registry, so an empty document and a never-created UUID remain indistinguishable.
 
 ## Presence
 
