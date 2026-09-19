@@ -152,9 +152,11 @@ Structured Pino logs (not operation values, document text, or full sync payloads
 
 GitHub Actions (`.github/workflows/ci.yml`) runs on push and pull_request with Node `24.13.0`:
 
-`npm ci`, `format:check`, `lint`, `typecheck`, `test`, `build`.
+`check`: `npm ci`, `format:check`, `lint`, `typecheck`, `test`, `build`.
 
-CI does not run `npm run format` (it must not mutate files), does not publish Docker images, and does not run Playwright browser E2E. Playwright remains installed for later milestones. Browser acceptance is not automated on every push.
+`e2e` (after `check`): `npm ci`, `npx playwright install --with-deps chromium`, `npm run test:e2e`.
+
+CI does not run `npm run format` (it must not mutate files) and does not publish Docker images. The Playwright job is Chromium-only and is not a Docker or Firefox/WebKit matrix.
 
 ## Current limitations
 
@@ -167,7 +169,7 @@ CI does not run `npm run format` (it must not mutate files), does not publish Do
 - fresh client receives full server history
 - no server snapshot/compaction
 - no automated backup
-- no browser E2E in CI
+- Chromium-only Playwright gate; not Firefox/WebKit and not every manual disaster scenario
 - same-origin tab identity limitation
 - SQLite journal mode is unchanged (not WAL)
 - no authentication, authorization, Redis, or multi-instance room state

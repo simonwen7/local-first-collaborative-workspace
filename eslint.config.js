@@ -21,7 +21,7 @@ export default tseslint.config(
     },
   },
   {
-    files: ['apps/server/**/*.ts', '*.js'],
+    files: ['apps/server/**/*.ts', '*.js', 'e2e/**/*.ts', 'playwright.config.ts'],
     languageOptions: {
       globals: globals.node,
     },

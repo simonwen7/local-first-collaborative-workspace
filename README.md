@@ -36,7 +36,7 @@ Local cold-start can restore a complete `TextReplica` checkpoint from IndexedDB,
 
 The Fastify server still uses a global SQLite `server_seq` AUTOINCREMENT log. Gaps from other documents are not treated as missing operations for this document. The server does not store snapshots. SQLite journal mode is unchanged (library default rollback journal; WAL is not enabled).
 
-The server now validates runtime configuration at startup, bounds inbound WebSocket frames and protocol string sizes, optionally allowlists browser Origins, heartbeats idle sockets, exposes `/ready` and process-local `/metrics`, logs structured WebSocket lifecycle events, and shuts down on SIGINT/SIGTERM. Docker Compose runs exactly one server replica with a named `/data` volume. GitHub Actions runs format/lint/typecheck/test/build on Node 24.13.0. Playwright is installed but browser E2E is not in CI.
+The server now validates runtime configuration at startup, bounds inbound WebSocket frames and protocol string sizes, optionally allowlists browser Origins, heartbeats idle sockets, exposes `/ready` and process-local `/metrics`, logs structured WebSocket lifecycle events, and shuts down on SIGINT/SIGTERM. Docker Compose runs exactly one server replica with a named `/data` volume. GitHub Actions runs format/lint/typecheck/test/build on Node 24.13.0, then a Chromium Playwright reliability gate.
 
 This is not a production-ready collaboration service.
 
@@ -51,7 +51,7 @@ Remaining limitations:
 - fresh client receives full server history
 - no server snapshot/compaction
 - no automated backup
-- no browser E2E in CI
+- Chromium-only Playwright gate; not Firefox/WebKit and not every manual disaster scenario
 - same-origin normal tabs still share one local replica and client identity
 - no service-worker / PWA offline shell
 - no destructive operation compaction or tombstone garbage collection
@@ -84,6 +84,8 @@ apps/
 packages/
   crdt/       Pure collaborative text engine
   protocol/   Shared wire contracts
+
+e2e/          Chromium Playwright reliability gate
 
 docs/
   architecture/
@@ -132,6 +134,36 @@ npm run format:check
 npm test
 ```
 
+## Browser E2E
+
+A small Chromium Playwright reliability gate lives in `e2e/`. It is **not** a full manual-acceptance clone and does not cover Firefox or WebKit.
+
+First time:
+
+```bash
+npm run test:e2e:install
+```
+
+Then:
+
+```bash
+npm run test:e2e
+```
+
+`npm test` remains Vitest-only and does not need Chromium.
+
+Playwright:
+
+- builds the production Vite app with `VITE_SYNC_URL=ws://127.0.0.1:3011/sync`
+- serves it with `vite preview` on `127.0.0.1:4177` (`--strictPort`)
+- starts a compiled Fastify process on `127.0.0.1:3011` with a unique temporary SQLite file per test
+
+Do not start `dev:web` / `dev:server` first. If 4177 or 3011 is already taken, the run fails instead of attaching to a stale process.
+
+Collaborators use **separate browser contexts**. Workers = 1, retries = 0. Failures keep a Playwright trace and screenshot (`playwright-report/`, `test-results/`).
+
+GitHub Actions runs this gate in an `e2e` job **after** the core `check` job.
+
 ## Production / single-node deployment
 
 Supported topology: **one stateful Fastify process** and **one persistent SQLite file**. Persistent SQLite is mandatory. The web app can be deployed as static files. The server requires long-lived WebSockets. Multi-instance deployment is not supported.
@@ -163,6 +195,6 @@ Compose publishes `3001:3001`, mounts named volume `lfcw-data` at `/data`, sets 
 
 The SQLite file is canonical server history. Loss of that file is serious. Back up with the server stopped or with SQLite-aware tooling; do not blindly copy a live database as a guaranteed safe backup. Clients cannot automatically rebuild a lost server. There is no automated backup subsystem.
 
-CI (`.github/workflows/ci.yml`) runs `format:check`, `lint`, `typecheck`, `test`, and `build` on Node 24.13.0. It does not run Playwright E2E and does not publish images.
+CI (`.github/workflows/ci.yml`) runs `format:check`, `lint`, `typecheck`, `test`, and `build` on Node 24.13.0, then a Chromium Playwright job. It does not publish images.
 
 Do not claim unsupported performance, scalability, or reliability numbers before they have been measured.
