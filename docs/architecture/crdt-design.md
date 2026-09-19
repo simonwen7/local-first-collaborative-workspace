@@ -95,6 +95,16 @@ Therefore they materialize the same visible document.
 
 Arrival order is not part of this result.
 
+## Client Checkpoints
+
+A fully resolved replica can export a version-1 `TextReplica` snapshot: every node including tombstones, plus historical delete operations. Insert operations are reconstructed from node fields. `childrenByParent` and pending maps are not serialized. Unresolved replicas cannot be snapshotted.
+
+`fromSnapshot` rebuilds nodes, `knownOperations`, and child order directly. Sibling groups use the existing comparator. Parent-cycle validation is an O(n)-style iterative walk.
+
+## Sequential Replay
+
+Cycle detection walks pending/missing-anchor chains only. An insert whose anchor already exists in the attached graph cannot create an ancestor cycle involving that new node. Duplicate, identity-conflict, pending, and sibling-order semantics are unchanged.
+
 ## Scope Boundaries
 
 Level 2 does not require:

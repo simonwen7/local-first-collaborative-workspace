@@ -1,7 +1,9 @@
 export {
   InvalidOperationError,
+  InvalidReplicaSnapshotError,
   OperationDependencyCycleError,
   OperationIdentityConflictError,
+  UnresolvedReplicaSnapshotError,
 } from './errors.js';
 
 export {
@@ -27,6 +29,8 @@ export type {
   OperationId,
   RootId,
   TextOperation,
+  TextReplicaSnapshot,
+  TextReplicaSnapshotNode,
   VisibleElement,
 } from './types.js';
 

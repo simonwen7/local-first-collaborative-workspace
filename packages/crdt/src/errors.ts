@@ -18,3 +18,19 @@ export class OperationDependencyCycleError extends Error {
     this.name = 'OperationDependencyCycleError';
   }
 }
+
+export class InvalidReplicaSnapshotError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvalidReplicaSnapshotError';
+  }
+}
+
+export class UnresolvedReplicaSnapshotError extends Error {
+  constructor(operationIds: readonly string[]) {
+    super(
+      `Cannot export a snapshot while operations remain unresolved: ${operationIds.join(', ')}`,
+    );
+    this.name = 'UnresolvedReplicaSnapshotError';
+  }
+}

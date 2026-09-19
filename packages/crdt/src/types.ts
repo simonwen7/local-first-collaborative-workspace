@@ -37,3 +37,19 @@ export type ApplyStatus = 'applied' | 'pending' | 'duplicate';
 export interface ApplyResult {
   readonly status: ApplyStatus;
 }
+
+export interface TextReplicaSnapshotNode {
+  readonly id: ElementId;
+  readonly afterId: AnchorId;
+  readonly value: string;
+  readonly clientId: ClientId;
+  readonly counter: number;
+  readonly lamport: number;
+  readonly tombstone: boolean;
+}
+
+export interface TextReplicaSnapshot {
+  readonly version: 1;
+  readonly nodes: TextReplicaSnapshotNode[];
+  readonly deleteOperations: DeleteOperation[];
+}

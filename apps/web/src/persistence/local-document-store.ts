@@ -5,11 +5,17 @@ import {
   operationsEqual,
   validateOperation,
 } from '@lfcw/crdt';
-import type { TextOperation } from '@lfcw/crdt';
+import type { TextOperation, TextReplicaSnapshot } from '@lfcw/crdt';
 import type { SequencedOperation } from '@lfcw/protocol';
 import type { LocalTextEdit } from '../editor/text-edit';
 import { CLIENT_META_KEY, LocalWorkspaceDatabase } from './database';
-import type { ClientMetaRecord, DocumentRecord, OperationRecord, OutboxRecord } from './database';
+import type {
+  ClientMetaRecord,
+  DocumentRecord,
+  OperationRecord,
+  OutboxRecord,
+  ReplicaSnapshotRecord,
+} from './database';
 
 export const DEFAULT_DOCUMENT_ID = 'local-default-document';
 
@@ -135,6 +141,25 @@ export class LocalDocumentStore {
   async getLastServerSeq(documentId: string): Promise<number> {
     const syncState = await this.database.syncState.get(documentId);
     return syncState?.lastServerSeq ?? 0;
+  }
+
+  async loadReplicaSnapshot(documentId: string): Promise<ReplicaSnapshotRecord | undefined> {
+    return this.database.replicaSnapshots.get(documentId);
+  }
+
+  async saveReplicaSnapshot(
+    documentId: string,
+    snapshot: TextReplicaSnapshot,
+    knownOperationCount: number,
+  ): Promise<void> {
+    const record: ReplicaSnapshotRecord = {
+      documentId,
+      snapshot,
+      knownOperationCount,
+      createdAt: this.now(),
+    };
+
+    await this.database.replicaSnapshots.put(record);
   }
 
   async persistLocalTextEdit(documentId: string, edit: LocalTextEdit): Promise<TextOperation[]> {

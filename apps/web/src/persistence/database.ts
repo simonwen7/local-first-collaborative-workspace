@@ -1,5 +1,5 @@
 import Dexie, { type Table, type Transaction } from 'dexie';
-import type { TextOperation } from '@lfcw/crdt';
+import type { TextOperation, TextReplicaSnapshot } from '@lfcw/crdt';
 
 export const CLIENT_META_KEY = 'local-replica' as const;
 
@@ -35,12 +35,20 @@ export interface SyncStateRecord {
   readonly lastServerSeq: number;
 }
 
+export interface ReplicaSnapshotRecord {
+  readonly documentId: string;
+  readonly snapshot: TextReplicaSnapshot;
+  readonly knownOperationCount: number;
+  readonly createdAt: string;
+}
+
 export class LocalWorkspaceDatabase extends Dexie {
   readonly clientMeta!: Table<ClientMetaRecord, string>;
   readonly documents!: Table<DocumentRecord, string>;
   readonly operations!: Table<OperationRecord, string>;
   readonly outbox!: Table<OutboxRecord, string>;
   readonly syncState!: Table<SyncStateRecord, string>;
+  readonly replicaSnapshots!: Table<ReplicaSnapshotRecord, string>;
 
   constructor(databaseName = 'lfcw-local-workspace') {
     super(databaseName);
@@ -62,6 +70,15 @@ export class LocalWorkspaceDatabase extends Dexie {
       .upgrade(async (transaction: Transaction) => {
         await migrateV1ToV2(transaction);
       });
+
+    this.version(3).stores({
+      clientMeta: '&key',
+      documents: '&id, updatedAt',
+      operations: '&opId, documentId, createdAt',
+      outbox: '&opId, documentId, createdAt',
+      syncState: '&documentId',
+      replicaSnapshots: '&documentId, createdAt',
+    });
   }
 }
 

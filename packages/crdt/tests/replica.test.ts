@@ -26,6 +26,17 @@ function insert(
 }
 
 describe('TextReplica', () => {
+  it('applies sequential inserts after already-attached anchors', () => {
+    const replica = new TextReplica();
+    const first = insert('alice', 1, 1, ROOT_ID, 'A');
+    const second = insert('alice', 2, 2, first.opId, 'B');
+
+    expect(replica.apply(first).status).toBe('applied');
+    expect(replica.apply(second).status).toBe('applied');
+    expect(replica.materialize()).toBe('AB');
+    expect(replica.getUnresolvedOperationIds()).toEqual([]);
+  });
+
   it('materializes a sequential insert chain', () => {
     const replica = new TextReplica();
 
@@ -153,6 +164,18 @@ describe('TextReplica', () => {
     expect(replica.apply(a).status).toBe('pending');
 
     expect(() => replica.apply(b)).toThrow(OperationDependencyCycleError);
+  });
+
+  it('rejects a longer pending dependency cycle', () => {
+    const a = insert('alice', 1, 1, 'carol:1', 'A');
+    const b = insert('bob', 1, 2, 'alice:1', 'B');
+    const c = insert('carol', 1, 3, 'bob:1', 'C');
+
+    const replica = new TextReplica();
+    expect(replica.apply(a).status).toBe('pending');
+    expect(replica.apply(b).status).toBe('pending');
+
+    expect(() => replica.apply(c)).toThrow(OperationDependencyCycleError);
   });
 
   it('uses locale-independent code-unit ordering for tied client IDs', () => {

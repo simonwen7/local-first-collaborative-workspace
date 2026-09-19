@@ -18,7 +18,7 @@ The editor UI is the product surface. The synchronization engine is the primary 
 
 ## Current Status
 
-Milestone 3 — Durable offline / reconnect synchronization.
+Milestone 4 — Client CRDT checkpoints and sequential replay hardening.
 
 The browser remains local-first. Documents load from IndexedDB. Local edits continue and are saved even when the collaboration server is unavailable.
 
@@ -26,14 +26,17 @@ Local operations are written atomically to the operation log and a durable outbo
 
 When the socket drops, the client automatically reconnects on a deterministic schedule (250ms, 500ms, 1s, 2s, then 4s). Reconnect joins with the persisted cursor, incrementally downloads missing SQLite history through a fixed barrier, then uploads remaining outbox operations. Sender echoes and reconnect replay both acknowledge outbox rows. Page reload does not lose unsent local operations.
 
-The Fastify server still uses a global SQLite `server_seq` AUTOINCREMENT log. Gaps from other documents are not treated as missing operations for this document.
+Local cold-start can restore a complete `TextReplica` checkpoint from IndexedDB, then still reapply the full canonical operation log. Checkpoints accelerate reconstruction. They do not replace the operation log, delete historical rows, or garbage-collect tombstones. A missing, stale, or corrupt checkpoint falls back to full replay. Fresh clients still bootstrap from server operation history. The common sequential-insert replay path no longer walks every ancestor chain to `ROOT`.
+
+The Fastify server still uses a global SQLite `server_seq` AUTOINCREMENT log. Gaps from other documents are not treated as missing operations for this document. The server does not store snapshots.
 
 This is not a production-ready collaboration service.
 
 Remaining limitations:
 
 - no service-worker / PWA offline shell
-- no snapshots or compaction
+- no destructive operation compaction or tombstone garbage collection
+- no server-side snapshots
 - no authentication, presence, or rich text
 - a server history reset that leaves a client cursor ahead of SQLite requires intervention (`sync-cursor-ahead`)
 - same-origin normal tabs still share one local replica and client identity
@@ -41,7 +44,7 @@ Remaining limitations:
 ## Planned Architecture
 
 - React + Vite browser application
-- IndexedDB + Dexie local persistence (v2: operations, outbox, syncState)
+- IndexedDB + Dexie local persistence (v3: operations, outbox, syncState, replicaSnapshots)
 - custom RGA-inspired collaborative text CRDT
 - explicit WebSocket synchronization protocol (`@lfcw/protocol`)
 - Fastify Node server with a `/sync` WebSocket endpoint

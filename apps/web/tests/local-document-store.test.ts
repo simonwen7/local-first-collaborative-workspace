@@ -2,7 +2,12 @@ import 'fake-indexeddb/auto';
 
 import Dexie from 'dexie';
 import { describe, expect, it } from 'vitest';
-import { OperationIdentityConflictError, ROOT_ID, createInsertOperation } from '@lfcw/crdt';
+import {
+  OperationIdentityConflictError,
+  ROOT_ID,
+  TextReplica,
+  createInsertOperation,
+} from '@lfcw/crdt';
 import { CLIENT_META_KEY, LocalWorkspaceDatabase } from '../src/persistence/database';
 import { LocalDocumentStore } from '../src/persistence/local-document-store';
 
@@ -289,5 +294,132 @@ describe('LocalDocumentStore', () => {
     expect(await store.loadPendingOperations('local-default-document')).toEqual([localOperation]);
 
     await upgraded.delete();
+  });
+
+  it('migrates a v2 database onto replicaSnapshots without rewriting history', async () => {
+    const databaseName = uniqueDatabaseName('migrate-v2');
+    const legacy = new Dexie(databaseName);
+    legacy.version(2).stores({
+      clientMeta: '&key',
+      documents: '&id, updatedAt',
+      operations: '&opId, documentId, createdAt',
+      outbox: '&opId, documentId, createdAt',
+      syncState: '&documentId',
+    });
+
+    const localOperation = createInsertOperation({
+      clientId: 'client-v2',
+      counter: 1,
+      lamport: 1,
+      afterId: ROOT_ID,
+      value: 'L',
+    });
+    const remoteOperation = createInsertOperation({
+      clientId: 'client-remote',
+      counter: 1,
+      lamport: 4,
+      afterId: localOperation.opId,
+      value: 'R',
+    });
+
+    await legacy.open();
+    await legacy.table('clientMeta').add({
+      key: CLIENT_META_KEY,
+      clientId: 'client-v2',
+      nextCounter: 2,
+      lamportClock: 4,
+    });
+    await legacy.table('documents').add({
+      id: 'local-default-document',
+      title: 'Local Document',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    await legacy.table('operations').bulkAdd([
+      {
+        opId: localOperation.opId,
+        documentId: 'local-default-document',
+        operation: localOperation,
+        createdAt: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        opId: remoteOperation.opId,
+        documentId: 'local-default-document',
+        operation: remoteOperation,
+        createdAt: '2026-01-01T00:00:01.000Z',
+      },
+    ]);
+    await legacy.table('outbox').add({
+      opId: localOperation.opId,
+      documentId: 'local-default-document',
+      createdAt: 1,
+    });
+    await legacy.table('syncState').add({
+      documentId: 'local-default-document',
+      lastServerSeq: 7,
+    });
+    legacy.close();
+
+    const upgraded = new LocalWorkspaceDatabase(databaseName);
+    const store = new LocalDocumentStore(upgraded, {
+      clientIdFactory: () => 'should-not-replace',
+    });
+    await store.initialize();
+
+    const migratedOperations = await store.loadOperations('local-default-document');
+    expect(migratedOperations).toHaveLength(2);
+    expect(migratedOperations).toEqual(expect.arrayContaining([localOperation, remoteOperation]));
+    expect(await store.getLastServerSeq('local-default-document')).toBe(7);
+    expect(await store.loadPendingOperations('local-default-document')).toEqual([localOperation]);
+    expect(await store.loadReplicaSnapshot('local-default-document')).toBeUndefined();
+    expect(await upgraded.replicaSnapshots.count()).toBe(0);
+    expect((await store.readClientMeta()).clientId).toBe('client-v2');
+
+    await upgraded.delete();
+  });
+
+  it('saves and replaces one checkpoint per document without touching canonical tables', async () => {
+    const database = new LocalWorkspaceDatabase(uniqueDatabaseName('replica-snapshots'));
+    const store = new LocalDocumentStore(database, {
+      clientIdFactory: () => 'client-snap',
+      now: () => '2026-01-01T00:00:00.000Z',
+    });
+    const initialized = await store.initialize();
+    const operations = await store.persistLocalTextEdit(initialized.document.id, {
+      deleteTargetIds: [],
+      insertAfterId: ROOT_ID,
+      insertValues: ['A'],
+    });
+    await store.persistServerOperations(
+      initialized.document.id,
+      [{ serverSeq: 2, operation: operations[0]! }],
+      2,
+    );
+
+    const replica = new TextReplica();
+    replica.applyAll(operations);
+    const firstSnapshot = replica.exportSnapshot();
+
+    await store.saveReplicaSnapshot(initialized.document.id, firstSnapshot, 1);
+    const first = await store.loadReplicaSnapshot(initialized.document.id);
+    expect(first?.knownOperationCount).toBe(1);
+    expect(first?.createdAt).toBe('2026-01-01T00:00:00.000Z');
+    expect(first?.snapshot.version).toBe(1);
+
+    const laterStore = new LocalDocumentStore(database, {
+      clientIdFactory: () => 'client-snap',
+      now: () => '2026-01-01T00:00:10.000Z',
+    });
+    await laterStore.saveReplicaSnapshot(initialized.document.id, firstSnapshot, 4);
+    const replaced = await laterStore.loadReplicaSnapshot(initialized.document.id);
+
+    expect(replaced?.knownOperationCount).toBe(4);
+    expect(replaced?.createdAt).toBe('2026-01-01T00:00:10.000Z');
+    expect(await laterStore.loadOperations(initialized.document.id)).toEqual(operations);
+    expect(await laterStore.loadPendingOperations(initialized.document.id)).toEqual([]);
+    expect(await laterStore.getLastServerSeq(initialized.document.id)).toBe(2);
+    expect(await database.replicaSnapshots.count()).toBe(1);
+
+    await database.delete();
   });
 });

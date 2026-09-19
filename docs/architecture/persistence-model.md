@@ -2,11 +2,11 @@
 
 ## Status
 
-Implemented through Milestone 3 for the local-first operation log, outbox, and per-document sync cursor.
+Implemented through Milestone 4 for the local-first operation log, outbox, per-document sync cursor, and client CRDT checkpoint cache.
 
 ## Client Persistence
 
-The browser uses IndexedDB through Dexie (`lfcw-local-workspace`, version 2).
+The browser uses IndexedDB through Dexie (`lfcw-local-workspace`, version 3).
 
 Current stores:
 
@@ -15,10 +15,13 @@ Current stores:
 - `operations` — canonical CRDT operation log (`opId` primary key; no `serverSeq` / ack / origin fields)
 - `outbox` — `{ opId, documentId, createdAt }` markers for unacknowledged local operations
 - `syncState` — `{ documentId, lastServerSeq }`
+- `replicaSnapshots` — at most one derived `TextReplica` checkpoint per document
 
-Snapshots, comments, and a service-worker offline shell are not implemented.
+Canonical durable truth remains `operations` + `clientMeta` + `outbox` + `syncState`. `replicaSnapshots` is an acceleration cache. A missing, stale, or corrupt checkpoint must fall back to full operation replay. Checkpoints do not delete operation rows, tombstones, or historical payloads.
 
 A v1 → v2 upgrade preserves existing rows, initializes `lastServerSeq = 0`, and re-queues locally originated operations into the outbox. Server duplicate handling makes that re-queue safe.
+
+A v2 → v3 upgrade preserves every existing table and row and adds `replicaSnapshots`. It does not rewrite operations or create a checkpoint inside the Dexie upgrade transaction. The first Milestone 4 open of a migrated document reconstructs from the operation log, after which the controller may write the first checkpoint.
 
 ## Client Identity
 
@@ -76,11 +79,13 @@ Visible text is materialized from CRDT state reconstructed from operations and, 
 
 ## Snapshots
 
-Snapshots are checkpoints / performance optimizations.
+Client CRDT checkpoints are performance accelerators only.
 
-A snapshot records the server watermark through which it is valid.
+A checkpoint stores a version-1 `TextReplica` snapshot plus the known-operation count it represents. It does not store `lastServerSeq`. `syncState` remains the source of truth for the server cursor. A checkpoint may include unacknowledged local operations and may be ahead of or behind `lastServerSeq`.
 
-A snapshot does not replace the operation log as the collaboration truth.
+A snapshot does not replace the operation log as the collaboration truth. The complete canonical operation log is retained in IndexedDB and SQLite. Milestone 4 does not implement destructive operation compaction, tombstone garbage collection, or server-side snapshots.
+
+After a trusted checkpoint restore, the controller still reapplies the complete canonical operation log. Operations already represented by the checkpoint become idempotent identity checks. Later suffix operations apply normally. If the checkpoint cannot be trusted, startup discards it in memory and rebuilds only from the canonical log.
 
 ## Presence
 

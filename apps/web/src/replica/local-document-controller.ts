@@ -1,10 +1,13 @@
-import { TextReplica } from '@lfcw/crdt';
-import type { TextOperation, VisibleElement } from '@lfcw/crdt';
+import { OperationIdentityConflictError, TextReplica } from '@lfcw/crdt';
+import type { TextOperation, TextReplicaSnapshot, VisibleElement } from '@lfcw/crdt';
 import type { SequencedOperation } from '@lfcw/protocol';
 import { computeLocalTextEdit } from '../editor/text-edit';
 import { LocalWorkspaceDatabase } from '../persistence/database';
 import { LocalDocumentStore } from '../persistence/local-document-store';
 import type { LocalDocumentStoreOptions } from '../persistence/local-document-store';
+import type { ReplicaSnapshotRecord } from '../persistence/database';
+
+export const SNAPSHOT_OPERATION_INTERVAL = 1000;
 
 export interface LocalDocumentSnapshot {
   readonly documentId: string;
@@ -25,10 +28,17 @@ export interface LocalEditResult {
 
 export interface LocalDocumentControllerOptions extends LocalDocumentStoreOptions {
   readonly databaseName?: string;
+  readonly snapshotInterval?: number;
+  readonly persistCheckpoint?: (
+    documentId: string,
+    snapshot: TextReplicaSnapshot,
+    knownOperationCount: number,
+  ) => Promise<void>;
 }
 
 export class LocalDocumentController {
   private writeQueue: Promise<void> = Promise.resolve();
+  private lastSnapshotOperationCount = 0;
 
   private constructor(
     private readonly store: LocalDocumentStore,
@@ -36,11 +46,18 @@ export class LocalDocumentController {
     private readonly documentId: string,
     private readonly clientId: string,
     private readonly title: string,
+    private readonly snapshotInterval: number,
+    private readonly persistCheckpoint: (
+      documentId: string,
+      snapshot: TextReplicaSnapshot,
+      knownOperationCount: number,
+    ) => Promise<void>,
   ) {}
 
   static async create(
     options: LocalDocumentControllerOptions = {},
   ): Promise<LocalDocumentController> {
+    const snapshotInterval = resolveSnapshotInterval(options.snapshotInterval);
     const database = new LocalWorkspaceDatabase(options.databaseName);
 
     const store = new LocalDocumentStore(database, {
@@ -51,11 +68,14 @@ export class LocalDocumentController {
     });
 
     const initialized = await store.initialize();
-    const replica = new TextReplica();
-
     const operations = await store.loadOperations(initialized.document.id);
+    const checkpoint = await store.loadReplicaSnapshot(initialized.document.id);
+    const persistCheckpoint =
+      options.persistCheckpoint ??
+      ((documentId, snapshot, knownOperationCount) =>
+        store.saveReplicaSnapshot(documentId, snapshot, knownOperationCount));
 
-    replica.applyAll(operations);
+    const { replica, lastSnapshotOperationCount } = restoreReplica(operations, checkpoint);
 
     const unresolved = replica.getUnresolvedOperationIds();
 
@@ -67,13 +87,18 @@ export class LocalDocumentController {
       );
     }
 
-    return new LocalDocumentController(
+    const controller = new LocalDocumentController(
       store,
       replica,
       initialized.document.id,
       initialized.clientMeta.clientId,
       initialized.document.title,
+      snapshotInterval,
+      persistCheckpoint,
     );
+    controller.lastSnapshotOperationCount = lastSnapshotOperationCount;
+    await controller.maybeCreateCheckpoint();
+    return controller;
   }
 
   getIdentity(): LocalDocumentIdentity {
@@ -144,6 +169,7 @@ export class LocalDocumentController {
     const operations = await this.store.persistLocalTextEdit(this.documentId, edit);
 
     this.replica.applyAll(operations);
+    await this.maybeCreateCheckpoint();
 
     return {
       snapshot: this.getSnapshot(),
@@ -161,6 +187,86 @@ export class LocalDocumentController {
       confirmedThroughServerSeq,
     );
     this.replica.applyAll(sequencedOperations.map((item) => item.operation));
+    await this.maybeCreateCheckpoint();
     return this.getSnapshot();
   }
+
+  private async maybeCreateCheckpoint(): Promise<void> {
+    if (this.replica.getUnresolvedOperationIds().length > 0) {
+      return;
+    }
+
+    const knownOperationCount = this.replica.getKnownOperationCount();
+
+    if (knownOperationCount - this.lastSnapshotOperationCount < this.snapshotInterval) {
+      return;
+    }
+
+    try {
+      const snapshot = this.replica.exportSnapshot();
+      await this.persistCheckpoint(this.documentId, snapshot, knownOperationCount);
+      this.lastSnapshotOperationCount = knownOperationCount;
+    } catch {
+      // Checkpoint cache failure must not fail a successful local persist/apply.
+    }
+  }
+}
+
+function resolveSnapshotInterval(value: number | undefined): number {
+  if (value === undefined) {
+    return SNAPSHOT_OPERATION_INTERVAL;
+  }
+
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error('snapshotInterval must be a positive safe integer.');
+  }
+
+  return value;
+}
+
+function restoreReplica(
+  operations: readonly TextOperation[],
+  checkpoint: ReplicaSnapshotRecord | undefined,
+): { replica: TextReplica; lastSnapshotOperationCount: number } {
+  if (checkpoint) {
+    try {
+      const restored = TextReplica.fromSnapshot(checkpoint.snapshot);
+
+      if (restored.getKnownOperationCount() !== checkpoint.knownOperationCount) {
+        throw new Error('Checkpoint known-operation count does not match restored replica.');
+      }
+
+      const canonicalIds = new Set(operations.map((operation) => operation.opId));
+
+      for (const operationId of restored.getKnownOperationIds()) {
+        if (!canonicalIds.has(operationId)) {
+          throw new Error(`Checkpoint contains operation "${operationId}" missing from the log.`);
+        }
+      }
+
+      restored.applyAll(operations);
+      return {
+        replica: restored,
+        lastSnapshotOperationCount: checkpoint.knownOperationCount,
+      };
+    } catch (error) {
+      if (error instanceof OperationIdentityConflictError || error instanceof Error) {
+        const replica = new TextReplica();
+        replica.applyAll(operations);
+        return {
+          replica,
+          lastSnapshotOperationCount: 0,
+        };
+      }
+
+      throw error;
+    }
+  }
+
+  const replica = new TextReplica();
+  replica.applyAll(operations);
+  return {
+    replica,
+    lastSnapshotOperationCount: 0,
+  };
 }
