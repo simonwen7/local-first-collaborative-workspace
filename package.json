@@ -18,6 +18,7 @@
     "apps/*"
   ],
   "scripts": {
+    "dev": "node scripts/dev.mjs",
     "dev:web": "npm run dev -w @lfcw/web",
     "dev:server": "npm run build -w @lfcw/crdt && npm run build -w @lfcw/protocol && npm run dev -w @lfcw/server",
     "build": "npm run build -w @lfcw/crdt && npm run build -w @lfcw/protocol && npm run build -w @lfcw/server && npm run build -w @lfcw/web",

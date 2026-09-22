@@ -12,6 +12,9 @@ export const DEFAULT_SYNC_URL = DEFAULT_DEV_SYNC_URL;
 
 export const RECONNECT_DELAYS_MS = [250, 500, 1000, 2000, 4000] as const;
 
+/** Consecutive failed connects before the UI treats the server as unreachable. */
+export const UNREACHABLE_AFTER_ATTEMPTS = 3;
+
 export type SyncStatus = 'offline' | 'connecting' | 'syncing' | 'online' | 'error';
 
 export interface DocumentSyncClientOptions {
@@ -35,6 +38,7 @@ export interface DocumentSyncClientOptions {
   readonly onStatusChange?: (status: SyncStatus) => void;
   readonly onPresence?: (participants: readonly PresenceParticipant[]) => void;
   readonly onServerSeqChange?: (latestServerSeq: number) => void;
+  readonly onUnreachableChange?: (unreachable: boolean) => void;
 }
 
 export class DocumentSyncClient {
@@ -49,6 +53,7 @@ export class DocumentSyncClient {
   private readonly onStatusChange?: (status: SyncStatus) => void;
   private readonly onPresence?: (participants: readonly PresenceParticipant[]) => void;
   private readonly onServerSeqChange?: (latestServerSeq: number) => void;
+  private readonly onUnreachableChange?: (unreachable: boolean) => void;
   private readonly displayName?: string;
   private readonly telemetry?: SyncTelemetry;
 
@@ -57,6 +62,8 @@ export class DocumentSyncClient {
   private inbound: Promise<void> = Promise.resolve();
   private closedByClient = false;
   private suspended = false;
+  private unreachable = false;
+  private consecutiveFailures = 0;
   private catchUpComplete = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
@@ -91,6 +98,10 @@ export class DocumentSyncClient {
       this.onServerSeqChange = options.onServerSeqChange;
     }
 
+    if (options.onUnreachableChange !== undefined) {
+      this.onUnreachableChange = options.onUnreachableChange;
+    }
+
     if (options.displayName !== undefined) {
       this.displayName = options.displayName;
     }
@@ -106,6 +117,10 @@ export class DocumentSyncClient {
 
   isSuspended(): boolean {
     return this.suspended;
+  }
+
+  isUnreachable(): boolean {
+    return this.unreachable;
   }
 
   /**
@@ -154,6 +169,27 @@ export class DocumentSyncClient {
 
     this.suspended = false;
     this.reconnectAttempt = 0;
+    this.connect();
+  }
+
+  /**
+   * Immediate reconnect from either intentional suspend or an unexpected drop.
+   * Unlike `resume()`, this is safe to call when the replica is not suspended:
+   * it cancels backoff and opens a socket now.
+   */
+  retry(): void {
+    if (this.closedByClient) {
+      return;
+    }
+
+    this.suspended = false;
+    this.cancelReconnect();
+    this.reconnectAttempt = 0;
+
+    if (this.socket) {
+      return;
+    }
+
     this.connect();
   }
 
@@ -206,6 +242,7 @@ export class DocumentSyncClient {
         return;
       }
 
+      this.noteConnectionFailure();
       this.setStatus('offline');
       this.scheduleReconnect();
     });
@@ -335,6 +372,7 @@ export class DocumentSyncClient {
 
       this.catchUpComplete = true;
       this.reconnectAttempt = 0;
+      this.noteConnectionSuccess();
       this.onServerSeqChange?.(message.latestServerSeq);
       this.telemetry?.emit({
         stage: 'server-log',
@@ -482,7 +520,13 @@ export class DocumentSyncClient {
   }
 
   private scheduleReconnect(): void {
-    if (this.closedByClient || this.suspended || this.reconnectTimer !== null || this.socket) {
+    if (
+      this.closedByClient ||
+      this.suspended ||
+      this.unreachable ||
+      this.reconnectTimer !== null ||
+      this.socket
+    ) {
       return;
     }
 
@@ -508,6 +552,33 @@ export class DocumentSyncClient {
 
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
+  }
+
+  private noteConnectionFailure(): void {
+    if (this.closedByClient || this.suspended) {
+      return;
+    }
+
+    this.consecutiveFailures += 1;
+
+    if (this.consecutiveFailures < UNREACHABLE_AFTER_ATTEMPTS || this.unreachable) {
+      return;
+    }
+
+    this.unreachable = true;
+    this.cancelReconnect();
+    this.onUnreachableChange?.(true);
+  }
+
+  private noteConnectionSuccess(): void {
+    this.consecutiveFailures = 0;
+
+    if (!this.unreachable) {
+      return;
+    }
+
+    this.unreachable = false;
+    this.onUnreachableChange?.(false);
   }
 
   private setStatus(status: SyncStatus): void {

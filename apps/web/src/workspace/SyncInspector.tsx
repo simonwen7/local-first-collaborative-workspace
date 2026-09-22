@@ -7,6 +7,7 @@ import {
 } from '../telemetry/sync-telemetry';
 import type { PipelineStage, SyncTelemetryEvent } from '../telemetry/sync-telemetry';
 import type { SyncStatus } from '../sync/document-sync-client';
+import type { NetworkControlView } from '../sync/network-control';
 import { Icon } from '../ui/Icon';
 import { shortId } from './WorkspaceSidebar';
 
@@ -15,7 +16,7 @@ const ACTIVE_WINDOW_MS = 1100;
 
 interface SyncInspectorProps {
   readonly syncStatus: SyncStatus;
-  readonly offlineMode: boolean;
+  readonly network: NetworkControlView;
   readonly pendingCount: number;
   readonly lastServerSeq: number;
   readonly documentId: string | null;
@@ -28,7 +29,7 @@ interface SyncInspectorProps {
 
 export function SyncInspector({
   syncStatus,
-  offlineMode,
+  network,
   pendingCount,
   lastServerSeq,
   documentId,
@@ -73,8 +74,8 @@ export function SyncInspector({
             </div>
             <div className="stat">
               <div className="stat__key">Network</div>
-              <div className={`stat__value ${connectionTone(syncStatus, offlineMode)}`}>
-                {connectionLabel(syncStatus, offlineMode)}
+              <div className={`stat__value ${inspectorTone(network)}`}>
+                {inspectorNetworkLabel(network)}
               </div>
             </div>
             <div className="stat">
@@ -295,39 +296,31 @@ function stageMeta(
   }
 }
 
-function connectionLabel(status: SyncStatus, offlineMode: boolean): string {
-  if (offlineMode) {
+function inspectorNetworkLabel(network: NetworkControlView): string {
+  if (network.intentionallyOffline) {
     return 'Offline';
   }
 
-  switch (status) {
-    case 'online':
-      return 'Online';
-    case 'connecting':
-      return 'Connecting';
-    case 'syncing':
-      return 'Catching up';
-    case 'offline':
-      return 'Disconnected';
-    case 'error':
-      return 'Error';
+  if (network.catchingUp) {
+    return network.statusLabel.replace(/^Sync: /, '');
   }
+
+  if (network.disconnected) {
+    return network.statusLabel.replace(/^Sync: /, '');
+  }
+
+  return 'Online';
 }
 
-function connectionTone(status: SyncStatus, offlineMode: boolean): string {
-  if (offlineMode) {
-    return 'stat__value--busy';
-  }
-
-  switch (status) {
-    case 'online':
+function inspectorTone(network: NetworkControlView): string {
+  switch (network.statusTone) {
+    case 'ok':
       return 'stat__value--ok';
-    case 'connecting':
-    case 'syncing':
+    case 'busy':
       return 'stat__value--busy';
-    case 'error':
+    case 'bad':
       return 'stat__value--bad';
-    case 'offline':
+    case 'idle':
       return '';
   }
 }

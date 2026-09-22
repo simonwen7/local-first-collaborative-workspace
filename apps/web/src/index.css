@@ -1113,6 +1113,10 @@ button:disabled {
   }
 }
 
+.tour__card--alert {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--border-strong));
+}
+
 .tour__progress {
   position: absolute;
   top: 0;

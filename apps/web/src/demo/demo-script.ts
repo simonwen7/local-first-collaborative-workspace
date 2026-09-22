@@ -2,6 +2,8 @@ import type { SyncStatus } from '../sync/document-sync-client';
 
 export type DemoStepId = 'intro' | 'local' | 'offline' | 'reconnect' | 'collaborate' | 'done';
 
+export type DemoReconnectPhase = 'action' | 'catching-up' | 'converged' | 'failed';
+
 export interface DemoStep {
   readonly id: DemoStepId;
   readonly eyebrow: string;
@@ -42,7 +44,7 @@ export const DEMO_STEPS: readonly DemoStep[] = [
     eyebrow: 'Step 3 of 4 · Convergence',
     title: 'Bring the network back',
     body: 'The client reconnects, replays the durable outbox, and the server assigns each operation a monotonic sequence. Watch pending operations drain to zero.',
-    action: 'Reconnect',
+    action: 'Reconnect & Continue',
     hint: 'Submissions are idempotent, so replays are safe.',
   },
   {
@@ -63,6 +65,9 @@ export const DEMO_STEPS: readonly DemoStep[] = [
   },
 ];
 
+/** Visual hold after genuine convergence so the Converged mark is readable. */
+export const DEMO_CONVERGENCE_HOLD_MS = 800;
+
 export function findDemoStep(id: DemoStepId): DemoStep {
   const step = DEMO_STEPS.find((candidate) => candidate.id === id);
 
@@ -79,6 +84,9 @@ export interface DemoProgressInput {
   readonly offlineEditCount: number;
   readonly pendingCount: number;
   readonly syncStatus: SyncStatus;
+  readonly suspended: boolean;
+  readonly unreachable: boolean;
+  readonly collaboratorStarted: boolean;
   readonly collaboratorDone: boolean;
 }
 
@@ -93,9 +101,9 @@ export function isDemoStepSatisfied(input: DemoProgressInput): boolean {
     case 'local':
       return input.localEditCount >= 3;
     case 'offline':
-      return input.offlineEditCount >= 1;
+      return input.suspended && input.offlineEditCount >= 1;
     case 'reconnect':
-      return input.pendingCount === 0 && input.syncStatus === 'online';
+      return input.pendingCount === 0 && input.syncStatus === 'online' && !input.suspended;
     case 'collaborate':
       return input.collaboratorDone;
     case 'done':
@@ -103,6 +111,52 @@ export function isDemoStepSatisfied(input: DemoProgressInput): boolean {
     default:
       return false;
   }
+}
+
+/**
+ * Whether the step is still waiting for its own primary action. Derived from
+ * real suspend/collaborator state so a toolbar click and a tour click cannot
+ * disagree.
+ */
+export function isDemoActionPending(input: DemoProgressInput): boolean {
+  switch (input.step) {
+    case 'intro':
+      return true;
+    case 'local':
+      return false;
+    case 'offline':
+      return !input.suspended;
+    case 'reconnect':
+      return input.suspended;
+    case 'collaborate':
+      return !input.collaboratorStarted;
+    case 'done':
+      return false;
+    default:
+      return false;
+  }
+}
+
+export function demoReconnectPhase(input: DemoProgressInput): DemoReconnectPhase | null {
+  if (input.step !== 'reconnect') {
+    return null;
+  }
+
+  if (input.suspended) {
+    return 'action';
+  }
+
+  if (input.pendingCount === 0 && input.syncStatus === 'online') {
+    return 'converged';
+  }
+
+  if (input.unreachable && input.syncStatus !== 'online') {
+    return input.syncStatus === 'connecting' || input.syncStatus === 'syncing'
+      ? 'catching-up'
+      : 'failed';
+  }
+
+  return 'catching-up';
 }
 
 export function nextDemoStep(step: DemoStepId): DemoStepId | null {

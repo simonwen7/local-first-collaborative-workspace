@@ -1,5 +1,6 @@
 import type { ChangeEvent, FormEvent, RefObject } from 'react';
 import { Icon } from '../ui/Icon';
+import type { NetworkControlView } from '../sync/network-control';
 import type { SaveState } from './Topbar';
 
 interface DocumentEditorProps {
@@ -9,7 +10,7 @@ interface DocumentEditorProps {
   readonly text: string;
   readonly saveState: SaveState;
   readonly switching: boolean;
-  readonly offlineMode: boolean;
+  readonly network: NetworkControlView;
   readonly pendingCount: number;
   readonly knownOperationCount: number;
   readonly errorMessage: string | null;
@@ -30,7 +31,7 @@ export function DocumentEditor({
   text,
   saveState,
   switching,
-  offlineMode,
+  network,
   pendingCount,
   knownOperationCount,
   errorMessage,
@@ -108,11 +109,15 @@ export function DocumentEditor({
             ·
           </span>
           <span>
-            {offlineMode
+            {network.intentionallyOffline
               ? pendingCount > 0
                 ? `Offline — ${String(pendingCount)} ${pendingCount === 1 ? 'change' : 'changes'} safely queued locally`
                 : 'Offline — edits stay durable on this device'
-              : 'Saved locally before every network attempt'}
+              : network.disconnected
+                ? pendingCount > 0
+                  ? `Disconnected — ${String(pendingCount)} ${pendingCount === 1 ? 'change' : 'changes'} queued locally`
+                  : 'Disconnected from the sync server'
+                : 'Saved locally before every network attempt'}
           </span>
         </p>
 

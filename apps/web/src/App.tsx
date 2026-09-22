@@ -9,11 +9,18 @@ import { LocalWorkspaceCatalog, defaultTitleFor } from './persistence/local-work
 import { LocalDocumentController } from './replica/local-document-controller';
 import { DocumentSyncClient } from './sync/document-sync-client';
 import type { SyncStatus } from './sync/document-sync-client';
+import { deriveNetworkControl } from './sync/network-control';
 import { SyncTelemetry } from './telemetry/sync-telemetry';
 import type { SyncTelemetryEvent } from './telemetry/sync-telemetry';
 import { DemoCollaborator } from './demo/demo-collaborator';
 import { DemoTour } from './demo/DemoTour';
-import { findDemoStep, isDemoStepSatisfied, nextDemoStep } from './demo/demo-script';
+import {
+  DEMO_CONVERGENCE_HOLD_MS,
+  findDemoStep,
+  isDemoActionPending,
+  isDemoStepSatisfied,
+  nextDemoStep,
+} from './demo/demo-script';
 import type { DemoStepId } from './demo/demo-script';
 import { Icon } from './ui/Icon';
 import { Toaster, useToasts } from './ui/toast';
@@ -84,6 +91,7 @@ export function App() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   const [offlineMode, setOfflineMode] = useState(false);
+  const [unreachable, setUnreachable] = useState(false);
   const [pendingCount, setPendingCount] = useState(0);
   const [lastServerSeq, setLastServerSeq] = useState(0);
   const [knownOperationCount, setKnownOperationCount] = useState(0);
@@ -93,9 +101,9 @@ export function App() {
   const [heroDismissed, setHeroDismissed] = useState(readHeroDismissed);
 
   const [demoStep, setDemoStep] = useState<DemoStepId | null>(null);
-  const [demoActionDone, setDemoActionDone] = useState(false);
   const [localEditCount, setLocalEditCount] = useState(0);
   const [offlineEditCount, setOfflineEditCount] = useState(0);
+  const [collaboratorStarted, setCollaboratorStarted] = useState(false);
   const [collaboratorDone, setCollaboratorDone] = useState(false);
 
   const { toasts, push: pushToast } = useToasts();
@@ -416,6 +424,13 @@ export function App() {
 
             setLastServerSeq(seq);
           },
+          onUnreachableChange: (nextUnreachable) => {
+            if (!transitions.isCurrent(generation) || unmountedRef.current) {
+              return;
+            }
+
+            setUnreachable(nextUnreachable);
+          },
         });
 
         const session: ActiveSession = {
@@ -435,6 +450,7 @@ export function App() {
         setText(snapshot.text);
         setSaveState('saved');
         setSyncStatus(syncClient.getStatus());
+        setUnreachable(syncClient.isUnreachable());
         setSwitching(false);
         refreshStats(session);
 
@@ -663,8 +679,10 @@ export function App() {
     const session = sessionRef.current;
     offlineModeRef.current = true;
     setOfflineMode(true);
+    setUnreachable(false);
     collaboratorRef.current?.dispose();
     collaboratorRef.current = null;
+    setCollaboratorStarted(false);
     session?.syncClient.suspend();
     pushToast('Offline. Edits keep committing to IndexedDB.', 'warn');
 
@@ -673,11 +691,11 @@ export function App() {
     }
   };
 
-  const goOnline = () => {
+  const reconnectNow = () => {
     const session = sessionRef.current;
     offlineModeRef.current = false;
     setOfflineMode(false);
-    session?.syncClient.resume();
+    session?.syncClient.retry();
     pushToast('Reconnecting and replaying the outbox…', 'info');
   };
 
@@ -692,6 +710,8 @@ export function App() {
       pushToast('Reconnect first so the second replica can converge.', 'warn');
       return;
     }
+
+    setCollaboratorStarted(true);
 
     const collaborator = new DemoCollaborator({
       documentId: session.documentId,
@@ -710,6 +730,9 @@ export function App() {
         }
 
         if (state === 'error') {
+          collaboratorRef.current?.dispose();
+          collaboratorRef.current = null;
+          setCollaboratorStarted(false);
           pushToast('Demo collaborator could not reach the server', 'bad');
         }
       },
@@ -719,53 +742,54 @@ export function App() {
     collaborator.start();
   };
 
-  const currentStep = demoStep === null ? null : findDemoStep(demoStep);
-  const stepSatisfied =
+  const network = deriveNetworkControl({
+    suspended: offlineMode,
+    status: syncStatus,
+    unreachable,
+  });
+
+  const demoProgress =
     demoStep === null
-      ? false
-      : isDemoStepSatisfied({
+      ? null
+      : {
           step: demoStep,
           localEditCount,
           offlineEditCount,
           pendingCount,
           syncStatus,
+          suspended: offlineMode,
+          unreachable,
+          collaboratorStarted,
           collaboratorDone,
-        });
+        };
+
+  const currentStep = demoStep === null ? null : findDemoStep(demoStep);
+  const stepSatisfied = demoProgress === null ? false : isDemoStepSatisfied(demoProgress);
+  const actionPending = demoProgress === null ? false : isDemoActionPending(demoProgress);
+
+  useEffect(() => {
+    if (demoStep !== 'reconnect' || !stepSatisfied) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setDemoStep('collaborate');
+    }, DEMO_CONVERGENCE_HOLD_MS);
+
+    return () => {
+      window.clearTimeout(timer);
+    };
+  }, [demoStep, stepSatisfied]);
 
   const launchDemo = () => {
     setDemoStep('intro');
-    setDemoActionDone(false);
     setLocalEditCount(0);
     setOfflineEditCount(0);
+    setCollaboratorStarted(false);
     setCollaboratorDone(false);
     setInspectorOpen(true);
     setHeroDismissed(true);
     persistHeroDismissed();
-  };
-
-  const advanceDemo = () => {
-    if (!currentStep || demoStep === null) {
-      return;
-    }
-
-    if (demoStep === 'done') {
-      exitDemo();
-      return;
-    }
-
-    if (currentStep.action !== null && !demoActionDone && demoStep !== 'intro') {
-      runDemoAction(demoStep);
-      setDemoActionDone(true);
-      return;
-    }
-
-    const next = nextDemoStep(demoStep);
-    setDemoActionDone(false);
-
-    if (next) {
-      setDemoStep(next);
-      focusEditor(next);
-    }
   };
 
   const runDemoAction = (step: DemoStepId) => {
@@ -775,12 +799,49 @@ export function App() {
     }
 
     if (step === 'reconnect') {
-      goOnline();
+      reconnectNow();
       return;
     }
 
     if (step === 'collaborate') {
       addDemoCollaborator();
+    }
+  };
+
+  const advanceDemo = () => {
+    if (!currentStep || demoStep === null || demoProgress === null) {
+      return;
+    }
+
+    if (demoStep === 'done') {
+      exitDemo();
+      return;
+    }
+
+    if (actionPending && currentStep.action !== null && demoStep !== 'intro') {
+      runDemoAction(demoStep);
+      return;
+    }
+
+    const next = nextDemoStep(demoStep);
+
+    if (next) {
+      setDemoStep(next);
+      focusEditor(next);
+    }
+  };
+
+  const applyNetworkAction = () => {
+    switch (network.actionKind) {
+      case 'go-offline':
+        goOffline();
+        return;
+      case 'reconnect':
+      case 'retry':
+        reconnectNow();
+        return;
+      case 'idle':
+        return;
     }
   };
 
@@ -801,7 +862,6 @@ export function App() {
 
   const exitDemo = () => {
     setDemoStep(null);
-    setDemoActionDone(false);
   };
 
   if (invalidRoute) {
@@ -842,15 +902,14 @@ export function App() {
         <div className="workspace">
           <Topbar
             saveState={saveState}
-            syncStatus={syncStatus}
-            offlineMode={offlineMode}
+            network={network}
             pendingCount={pendingCount}
             participants={participants}
             selfClientId={clientId}
             busy={switching}
             inspectorOpen={inspectorOpen}
             demoActive={demoStep !== null}
-            onToggleOffline={offlineMode ? goOnline : goOffline}
+            onNetworkAction={applyNetworkAction}
             onShare={() => {
               void shareActive();
             }}
@@ -865,7 +924,7 @@ export function App() {
             text={text}
             saveState={saveState}
             switching={switching}
-            offlineMode={offlineMode}
+            network={network}
             pendingCount={pendingCount}
             knownOperationCount={knownOperationCount}
             errorMessage={errorMessage}
@@ -907,7 +966,7 @@ export function App() {
         {inspectorOpen ? (
           <SyncInspector
             syncStatus={syncStatus}
-            offlineMode={offlineMode}
+            network={network}
             pendingCount={pendingCount}
             lastServerSeq={lastServerSeq}
             documentId={activeDocumentId}
@@ -920,12 +979,12 @@ export function App() {
         ) : null}
       </main>
 
-      {currentStep ? (
+      {currentStep && demoProgress ? (
         <DemoTour
           step={currentStep}
-          satisfied={stepSatisfied}
-          actionPending={currentStep.action !== null && !demoActionDone}
+          progress={demoProgress}
           onAdvance={advanceDemo}
+          onRetry={reconnectNow}
           onExit={exitDemo}
         />
       ) : null}

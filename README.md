@@ -130,15 +130,16 @@ Requires **Node 24.13.0** and npm (`engines`: `>=24 <25`).
 
 ```bash
 npm ci
+npm run dev
 ```
 
-Terminal 1:
+That single command starts the Fastify sync server **and** the Vite web app. The demo needs both: a frontend without a backend looks "offline" even though nobody asked it to.
+
+Alternatively, two terminals:
 
 ```bash
 npm run dev:server
 ```
-
-Terminal 2:
 
 ```bash
 npm run dev:web

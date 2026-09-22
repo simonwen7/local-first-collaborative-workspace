@@ -40,8 +40,9 @@ test('the demo collaborator converges real remote operations into this replica',
 
   await tour.getByRole('button', { name: 'Reconnect' }).click();
   await waitForSyncOnline(page);
-  await tour.getByRole('button', { name: 'Continue' }).click();
-
+  await expect(tour.getByRole('button', { name: 'Add demo collaborator' })).toBeVisible({
+    timeout: 10_000,
+  });
   await tour.getByRole('button', { name: 'Add demo collaborator' }).click();
 
   // Presence is ephemeral room state published by the server.

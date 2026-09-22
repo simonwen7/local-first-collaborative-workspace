@@ -1,20 +1,19 @@
 import type { PresenceParticipant } from '@lfcw/protocol';
-import type { SyncStatus } from '../sync/document-sync-client';
+import type { NetworkControlView } from '../sync/network-control';
 import { Icon } from '../ui/Icon';
 
 export type SaveState = 'loading' | 'saved' | 'saving' | 'error';
 
 interface TopbarProps {
   readonly saveState: SaveState;
-  readonly syncStatus: SyncStatus;
-  readonly offlineMode: boolean;
+  readonly network: NetworkControlView;
   readonly pendingCount: number;
   readonly participants: readonly PresenceParticipant[];
   readonly selfClientId: string | null;
   readonly busy: boolean;
   readonly inspectorOpen: boolean;
   readonly demoActive: boolean;
-  readonly onToggleOffline: () => void;
+  readonly onNetworkAction: () => void;
   readonly onShare: () => void;
   readonly onLaunchDemo: () => void;
   readonly onToggleInspector: () => void;
@@ -22,15 +21,14 @@ interface TopbarProps {
 
 export function Topbar({
   saveState,
-  syncStatus,
-  offlineMode,
+  network,
   pendingCount,
   participants,
   selfClientId,
   busy,
   inspectorOpen,
   demoActive,
-  onToggleOffline,
+  onNetworkAction,
   onShare,
   onLaunchDemo,
   onToggleInspector,
@@ -43,11 +41,11 @@ export function Topbar({
           <span className="pill__label">{saveStateLabel(saveState)}</span>
         </div>
 
-        <div className={`pill ${syncTone(syncStatus)}`} aria-live="polite">
+        <div className={`pill ${syncTone(network.statusTone)}`} aria-live="polite">
           <span className="pill__dot" aria-hidden="true" />
           {/* The label is its own node so the status string stays exact even
               when the queued-operation badge is present. */}
-          <span className="pill__label">{syncStatusLabel(syncStatus)}</span>
+          <span className="pill__label">{network.statusLabel}</span>
           {pendingCount > 0 ? (
             <span className="pill__count" title="Operations queued in the durable outbox">
               {pendingCount}
@@ -63,12 +61,12 @@ export function Topbar({
       <div className="topbar__group">
         <button
           type="button"
-          className={offlineMode ? 'btn btn--primary' : 'btn'}
-          disabled={busy}
-          onClick={onToggleOffline}
+          className={network.actionKind === 'go-offline' ? 'btn' : 'btn btn--primary'}
+          disabled={busy || !network.actionEnabled}
+          onClick={onNetworkAction}
         >
-          <Icon name={offlineMode ? 'online' : 'offline'} size={14} />
-          {offlineMode ? 'Reconnect' : 'Go Offline'}
+          <Icon name={network.actionKind === 'go-offline' ? 'offline' : 'online'} size={14} />
+          {network.actionLabel}
         </button>
 
         <button type="button" className="btn" disabled={busy} onClick={onShare}>
@@ -174,21 +172,6 @@ export function saveStateLabel(state: SaveState): string {
   }
 }
 
-export function syncStatusLabel(status: SyncStatus): string {
-  switch (status) {
-    case 'connecting':
-      return 'Sync: Connecting';
-    case 'syncing':
-      return 'Sync: Syncing';
-    case 'online':
-      return 'Sync: Online';
-    case 'offline':
-      return 'Sync: Offline';
-    case 'error':
-      return 'Sync: Error';
-  }
-}
-
 function saveTone(state: SaveState): string {
   switch (state) {
     case 'saved':
@@ -201,16 +184,15 @@ function saveTone(state: SaveState): string {
   }
 }
 
-function syncTone(status: SyncStatus): string {
-  switch (status) {
-    case 'online':
+function syncTone(tone: NetworkControlView['statusTone']): string {
+  switch (tone) {
+    case 'ok':
       return 'pill--ok';
-    case 'connecting':
-    case 'syncing':
+    case 'busy':
       return 'pill--busy';
-    case 'error':
+    case 'bad':
       return 'pill--bad';
-    case 'offline':
+    case 'idle':
       return 'pill--idle';
   }
 }

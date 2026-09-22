@@ -44,7 +44,15 @@ export async function waitForSyncOnline(page: Page): Promise<void> {
 
 export async function waitForSyncDisconnected(page: Page): Promise<void> {
   await expect(page.getByText('Sync: Online', { exact: true })).toHaveCount(0);
-  await expect(page.getByText(/^Sync: (Offline|Connecting|Error)$/)).toBeVisible();
+  await expect(
+    page.getByText(/^Sync: (Offline|Disconnected|Reconnecting|Catching up|Error|Unreachable)$/),
+  ).toBeVisible();
+}
+
+export function topbarNetworkButton(page: Page) {
+  return page.locator('.topbar').getByRole('button', {
+    name: /^(Go Offline|Reconnect|Retry Connection)$/,
+  });
 }
 
 export function getCurrentDocumentId(page: Page): string {

@@ -5,7 +5,11 @@ import {
   InvalidSnapshotBootstrapError,
   SnapshotBootstrapIneligibleError,
 } from '../src/persistence/local-document-store';
-import { DocumentSyncClient } from '../src/sync/document-sync-client';
+import {
+  DocumentSyncClient,
+  RECONNECT_DELAYS_MS,
+  UNREACHABLE_AFTER_ATTEMPTS,
+} from '../src/sync/document-sync-client';
 import type { SyncStatus } from '../src/sync/document-sync-client';
 
 const pendingOp = createInsertOperation({
@@ -250,21 +254,12 @@ describe('DocumentSyncClient', () => {
     expect(FakeWebSocket.instances).toHaveLength(3);
 
     lastSocket().close();
-    await vi.advanceTimersByTimeAsync(1000);
+    expect(client.isUnreachable()).toBe(true);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(FakeWebSocket.instances).toHaveLength(3);
+
+    client.retry();
     expect(FakeWebSocket.instances).toHaveLength(4);
-
-    lastSocket().close();
-    await vi.advanceTimersByTimeAsync(2000);
-    expect(FakeWebSocket.instances).toHaveLength(5);
-
-    lastSocket().close();
-    await vi.advanceTimersByTimeAsync(4000);
-    expect(FakeWebSocket.instances).toHaveLength(6);
-
-    lastSocket().close();
-    await vi.advanceTimersByTimeAsync(4000);
-    expect(FakeWebSocket.instances).toHaveLength(7);
-
     lastSocket().open();
     await flush(client);
     lastSocket().emitMessage({
@@ -274,10 +269,11 @@ describe('DocumentSyncClient', () => {
       latestServerSeq: 0,
     });
     await flush(client);
+    expect(client.isUnreachable()).toBe(false);
 
     lastSocket().close();
     await vi.advanceTimersByTimeAsync(250);
-    expect(FakeWebSocket.instances).toHaveLength(8);
+    expect(FakeWebSocket.instances).toHaveLength(5);
   });
 
   it('cancels reconnect on explicit close and does not open a second socket for error-then-close', async () => {
@@ -620,6 +616,82 @@ describe('DocumentSyncClient', () => {
     client.resume();
     client.resume();
     expect(client.isSuspended()).toBe(false);
+  });
+
+  it('retry reconnects immediately after an unexpected drop', async () => {
+    const client = createClient({
+      getLastServerSeq: async () => 0,
+    });
+
+    client.connect();
+    lastSocket().open();
+    await flush(client);
+    lastSocket().close();
+    expect(client.getStatus()).toBe('offline');
+    expect(client.isSuspended()).toBe(false);
+
+    client.retry();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(client.getStatus()).toBe('connecting');
+    expect(client.isSuspended()).toBe(false);
+  });
+
+  it('marks the server unreachable after consecutive failed connects', async () => {
+    const unreachable: boolean[] = [];
+    const client = createClient({
+      getLastServerSeq: async () => 0,
+      onUnreachableChange: (value) => {
+        unreachable.push(value);
+      },
+    });
+
+    client.connect();
+    lastSocket().close();
+    expect(client.isUnreachable()).toBe(false);
+
+    for (let attempt = 1; attempt < UNREACHABLE_AFTER_ATTEMPTS; attempt += 1) {
+      const delay =
+        RECONNECT_DELAYS_MS[Math.min(attempt - 1, RECONNECT_DELAYS_MS.length - 1)] ?? 4000;
+      await vi.advanceTimersByTimeAsync(delay);
+      lastSocket().close();
+    }
+    expect(client.isUnreachable()).toBe(true);
+    expect(unreachable).toEqual([true]);
+
+    const socketsAfterFailure = FakeWebSocket.instances.length;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(FakeWebSocket.instances).toHaveLength(socketsAfterFailure);
+
+    client.retry();
+    lastSocket().open();
+    await flush(client);
+    lastSocket().emitMessage({
+      type: 'sync',
+      documentId: 'local-default-document',
+      operations: [],
+      latestServerSeq: 0,
+    });
+    await flush(client);
+
+    expect(client.getStatus()).toBe('online');
+    expect(client.isUnreachable()).toBe(false);
+    expect(unreachable).toEqual([true, false]);
+  });
+
+  it('does not count operator suspend as an unreachable failure', async () => {
+    const client = createClient({
+      getLastServerSeq: async () => 0,
+    });
+
+    client.connect();
+    lastSocket().open();
+    await flush(client);
+    client.suspend();
+
+    expect(client.isSuspended()).toBe(true);
+    expect(client.isUnreachable()).toBe(false);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(client.isUnreachable()).toBe(false);
   });
 
   it('records an inbound failure instead of leaving an unhandled rejection', async () => {

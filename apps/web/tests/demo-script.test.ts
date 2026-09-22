@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   DEMO_STEPS,
+  demoReconnectPhase,
   findDemoStep,
+  isDemoActionPending,
   isDemoStepSatisfied,
   nextDemoStep,
 } from '../src/demo/demo-script';
@@ -13,6 +15,9 @@ const base: DemoProgressInput = {
   offlineEditCount: 0,
   pendingCount: 0,
   syncStatus: 'online',
+  suspended: false,
+  unreachable: false,
+  collaboratorStarted: false,
   collaboratorDone: false,
 };
 
@@ -37,6 +42,7 @@ describe('guided demo progression', () => {
       expect(step.hint.length).toBeGreaterThan(0);
     }
 
+    expect(findDemoStep('reconnect').action).toBe('Reconnect & Continue');
     expect(() => findDemoStep('nope' as never)).toThrow();
   });
 
@@ -45,24 +51,113 @@ describe('guided demo progression', () => {
     expect(isDemoStepSatisfied({ ...base, step: 'local', localEditCount: 3 })).toBe(true);
   });
 
-  it('gates the offline step on an edit made while disconnected', () => {
-    expect(isDemoStepSatisfied({ ...base, step: 'offline', offlineEditCount: 0 })).toBe(false);
-    expect(isDemoStepSatisfied({ ...base, step: 'offline', offlineEditCount: 1 })).toBe(true);
+  it('requires intentional suspend plus an offline edit for step 2', () => {
+    expect(
+      isDemoStepSatisfied({ ...base, step: 'offline', suspended: false, offlineEditCount: 1 }),
+    ).toBe(false);
+    expect(
+      isDemoStepSatisfied({ ...base, step: 'offline', suspended: true, offlineEditCount: 0 }),
+    ).toBe(false);
+    expect(
+      isDemoStepSatisfied({ ...base, step: 'offline', suspended: true, offlineEditCount: 1 }),
+    ).toBe(true);
+    expect(isDemoActionPending({ ...base, step: 'offline', suspended: false })).toBe(true);
+    expect(isDemoActionPending({ ...base, step: 'offline', suspended: true })).toBe(false);
   });
 
-  it('gates the reconnect step on a genuinely drained outbox', () => {
+  it('gates reconnect on a genuinely drained outbox after leaving suspend', () => {
     expect(
-      isDemoStepSatisfied({ ...base, step: 'reconnect', pendingCount: 2, syncStatus: 'syncing' }),
+      isDemoStepSatisfied({
+        ...base,
+        step: 'reconnect',
+        pendingCount: 2,
+        syncStatus: 'syncing',
+        suspended: false,
+      }),
     ).toBe(false);
     expect(
-      isDemoStepSatisfied({ ...base, step: 'reconnect', pendingCount: 0, syncStatus: 'syncing' }),
+      isDemoStepSatisfied({
+        ...base,
+        step: 'reconnect',
+        pendingCount: 0,
+        syncStatus: 'syncing',
+        suspended: false,
+      }),
     ).toBe(false);
     expect(
-      isDemoStepSatisfied({ ...base, step: 'reconnect', pendingCount: 0, syncStatus: 'online' }),
+      isDemoStepSatisfied({
+        ...base,
+        step: 'reconnect',
+        pendingCount: 0,
+        syncStatus: 'online',
+        suspended: true,
+      }),
+    ).toBe(false);
+    expect(
+      isDemoStepSatisfied({
+        ...base,
+        step: 'reconnect',
+        pendingCount: 0,
+        syncStatus: 'online',
+        suspended: false,
+      }),
     ).toBe(true);
   });
 
+  it('keeps the reconnect action pending only while still suspended', () => {
+    expect(isDemoActionPending({ ...base, step: 'reconnect', suspended: true })).toBe(true);
+    expect(isDemoActionPending({ ...base, step: 'reconnect', suspended: false })).toBe(false);
+  });
+
+  it('does not treat a failed reconnect as convergence', () => {
+    const failed: DemoProgressInput = {
+      ...base,
+      step: 'reconnect',
+      pendingCount: 345,
+      syncStatus: 'offline',
+      suspended: false,
+      unreachable: true,
+    };
+
+    expect(isDemoStepSatisfied(failed)).toBe(false);
+    expect(demoReconnectPhase(failed)).toBe('failed');
+    expect(isDemoActionPending(failed)).toBe(false);
+  });
+
+  it('shows catching-up while the outbox is draining', () => {
+    expect(
+      demoReconnectPhase({
+        ...base,
+        step: 'reconnect',
+        pendingCount: 12,
+        syncStatus: 'syncing',
+        suspended: false,
+      }),
+    ).toBe('catching-up');
+    expect(
+      demoReconnectPhase({
+        ...base,
+        step: 'reconnect',
+        pendingCount: 0,
+        syncStatus: 'online',
+        suspended: false,
+      }),
+    ).toBe('converged');
+    expect(
+      demoReconnectPhase({
+        ...base,
+        step: 'reconnect',
+        suspended: true,
+        syncStatus: 'offline',
+        pendingCount: 12,
+      }),
+    ).toBe('action');
+  });
+
   it('gates the collaboration step on the second replica finishing', () => {
+    expect(isDemoActionPending({ ...base, step: 'collaborate', collaboratorStarted: false })).toBe(
+      true,
+    );
     expect(isDemoStepSatisfied({ ...base, step: 'collaborate', collaboratorDone: false })).toBe(
       false,
     );
