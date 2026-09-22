@@ -11,6 +11,7 @@ import {
 } from '../persistence/local-document-store';
 import type { LocalDocumentStoreOptions } from '../persistence/local-document-store';
 import type { ReplicaSnapshotRecord, ServerBaselineRecord } from '../persistence/database';
+import type { SyncTelemetry } from '../telemetry/sync-telemetry';
 
 export class ControllerClosedError extends Error {
   constructor() {
@@ -43,6 +44,7 @@ export interface LocalDocumentControllerOptions extends LocalDocumentStoreOption
   readonly documentId?: string;
   readonly defaultTitle?: string;
   readonly snapshotInterval?: number;
+  readonly telemetry?: SyncTelemetry;
   readonly persistCheckpoint?: (
     documentId: string,
     snapshot: TextReplicaSnapshot,
@@ -57,6 +59,7 @@ export class LocalDocumentController {
   private closePromise: Promise<void> | null = null;
   private replica: TextReplica;
   private hasServerBaseline: boolean;
+  private telemetry: SyncTelemetry | undefined;
 
   private constructor(
     private readonly store: LocalDocumentStore,
@@ -142,6 +145,7 @@ export class LocalDocumentController {
       Boolean(baseline),
     );
     controller.lastSnapshotOperationCount = lastSnapshotOperationCount;
+    controller.telemetry = options.telemetry;
     await controller.maybeCreateCheckpoint();
     return controller;
   }
@@ -159,6 +163,14 @@ export class LocalDocumentController {
 
   loadPendingOperations(): Promise<TextOperation[]> {
     return this.store.loadPendingOperations(this.documentId);
+  }
+
+  countPendingOperations(): Promise<number> {
+    return this.store.countPendingOperations(this.documentId);
+  }
+
+  getKnownOperationCount(): number {
+    return this.replica.getKnownOperationCount();
   }
 
   isSnapshotBootstrapEligible(): Promise<boolean> {
@@ -262,7 +274,21 @@ export class LocalDocumentController {
       };
     }
 
+    this.telemetry?.emit({
+      stage: 'local-edit',
+      documentId: this.documentId,
+      message: `Diffed keystrokes into ${String(edit.deleteTargetIds.length + edit.insertValues.length)} CRDT operation(s).`,
+      count: edit.deleteTargetIds.length + edit.insertValues.length,
+    });
+
     const operations = await this.store.persistLocalTextEdit(this.documentId, edit);
+
+    this.telemetry?.emit({
+      stage: 'indexeddb',
+      documentId: this.documentId,
+      message: `Committed ${String(operations.length)} operation(s) to IndexedDB.`,
+      count: operations.length,
+    });
 
     this.replica.applyAll(operations);
     await this.maybeCreateCheckpoint();

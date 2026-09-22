@@ -527,6 +527,193 @@ describe('DocumentSyncClient', () => {
     ).toBe(true);
   });
 
+  it('suspends the real socket, keeps reconnect cancelled, and resumes on demand', async () => {
+    const client = createClient({
+      getLastServerSeq: async () => 0,
+    });
+
+    client.connect();
+    lastSocket().open();
+    await flush(client);
+    lastSocket().emitMessage({
+      type: 'sync',
+      documentId: 'local-default-document',
+      operations: [],
+      latestServerSeq: 0,
+    });
+    await flush(client);
+    expect(client.getStatus()).toBe('online');
+
+    client.suspend();
+    expect(client.isSuspended()).toBe(true);
+    expect(client.getStatus()).toBe('offline');
+    expect(lastSocket().readyState).toBe(FakeWebSocket.CLOSED);
+
+    // Suspension is operator-controlled, so automatic reconnect must stay off.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    // Local operations are still refused over the wire while suspended, which
+    // is what keeps them in the durable outbox.
+    client.submitOperations([pendingOp]);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    client.resume();
+    expect(client.isSuspended()).toBe(false);
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(client.getStatus()).toBe('connecting');
+  });
+
+  it('flushes the durable outbox after resuming from suspension', async () => {
+    let pending = [pendingOp];
+
+    const client = createClient({
+      getLastServerSeq: async () => 0,
+      loadPendingOperations: async () => pending,
+      onServerOperations: async (operations) => {
+        if (operations.some((item) => item.operation.opId === pendingOp.opId)) {
+          pending = [];
+        }
+      },
+    });
+
+    client.connect();
+    lastSocket().open();
+    await flush(client);
+    client.suspend();
+
+    client.resume();
+    lastSocket().open();
+    await flush(client);
+    lastSocket().emitMessage({
+      type: 'sync',
+      documentId: 'local-default-document',
+      operations: [],
+      latestServerSeq: 0,
+    });
+    await flush(client);
+
+    expect(
+      lastSocket().sent.filter(
+        (message) => (message as { type?: string }).type === 'submit-operation',
+      ),
+    ).toHaveLength(1);
+    expect(client.getStatus()).toBe('syncing');
+
+    lastSocket().emitMessage({
+      type: 'operation',
+      documentId: 'local-default-document',
+      serverSeq: 1,
+      operation: pendingOp,
+    });
+    await flush(client);
+    expect(client.getStatus()).toBe('online');
+  });
+
+  it('suspend is idempotent and resume is a no-op when not suspended', () => {
+    const client = createClient();
+
+    client.suspend();
+    client.suspend();
+    expect(client.isSuspended()).toBe(true);
+
+    client.resume();
+    client.resume();
+    expect(client.isSuspended()).toBe(false);
+  });
+
+  it('records an inbound failure instead of leaving an unhandled rejection', async () => {
+    const rejections: unknown[] = [];
+    const captureRejection = (error: unknown) => {
+      rejections.push(error);
+    };
+    process.on('unhandledRejection', captureRejection);
+
+    const failure = new Error('ingest exploded');
+
+    try {
+      const client = createClient({
+        getLastServerSeq: async () => 0,
+        onServerOperations: async () => {
+          throw failure;
+        },
+      });
+
+      client.connect();
+      lastSocket().open();
+      await flush(client);
+      lastSocket().emitMessage({
+        type: 'sync',
+        documentId: 'local-default-document',
+        operations: [],
+        latestServerSeq: 0,
+      });
+      await flush(client);
+
+      expect(client.getStatus()).toBe('error');
+      expect(client.getLastInboundError()).toBe(failure);
+
+      // A poisoned message must not break the queue for later messages.
+      lastSocket().emitMessage({
+        type: 'presence',
+        documentId: 'local-default-document',
+        participants: [],
+      });
+      await flush(client);
+
+      await vi.advanceTimersByTimeAsync(0);
+      await drainMicrotasks();
+      expect(rejections).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', captureRejection);
+    }
+  });
+
+  it('forwards presence rosters and clears them when the socket closes', async () => {
+    const rosters: (readonly { clientId: string }[])[] = [];
+    const client = createClient({
+      getLastServerSeq: async () => 0,
+      onPresence: (participants) => {
+        rosters.push([...participants]);
+      },
+    });
+
+    client.connect();
+    lastSocket().open();
+    await flush(client);
+
+    lastSocket().emitMessage({
+      type: 'presence',
+      documentId: 'local-default-document',
+      participants: [
+        { clientId: 'client-a', displayName: 'You', joinedAt: 1 },
+        { clientId: 'demo-1', displayName: 'Alex (demo)', joinedAt: 2 },
+      ],
+    });
+    await flush(client);
+
+    expect(rosters.at(-1)).toHaveLength(2);
+
+    lastSocket().close();
+    expect(rosters.at(-1)).toEqual([]);
+  });
+
+  it('sends a display name in join when one is configured', async () => {
+    const client = createClient({
+      getLastServerSeq: async () => 0,
+      displayName: 'You · AB12',
+    });
+
+    client.connect();
+    lastSocket().open();
+    await flush(client);
+
+    expect(lastSocket().sent[0]).toMatchObject({
+      type: 'join',
+      displayName: 'You · AB12',
+    });
+  });
+
   it('falls back once for a malformed snapshot and does not loop', async () => {
     const client = createClient({
       getLastServerSeq: async () => 0,

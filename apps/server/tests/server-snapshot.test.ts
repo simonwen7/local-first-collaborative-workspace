@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ROOT_ID, TextReplica, createInsertOperation } from '@lfcw/crdt';
-import type { TextReplicaSnapshot } from '@lfcw/crdt';
+import type { AnchorId, TextReplicaSnapshot } from '@lfcw/crdt';
 import { ServerMetrics } from '../src/observability/server-metrics.js';
 import { OperationStore } from '../src/operation-store.js';
 import { SNAPSHOT_OPERATION_THRESHOLD, ServerSnapshotManager } from '../src/server-snapshot.js';
@@ -10,7 +10,12 @@ const silentLogger = {
   warn(): void {},
 };
 
-function sequentialInserts(count: number, clientId = 'seed', startCounter = 1, afterId = ROOT_ID) {
+function sequentialInserts(
+  count: number,
+  clientId = 'seed',
+  startCounter = 1,
+  afterId: AnchorId = ROOT_ID,
+) {
   const operations = [];
   let anchor = afterId;
 

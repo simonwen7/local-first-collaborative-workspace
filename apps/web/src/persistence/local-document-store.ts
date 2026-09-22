@@ -147,6 +147,14 @@ export class LocalDocumentStore {
     return records.map((record) => record.operation);
   }
 
+  /**
+   * Count outbox markers without materializing their operations. Used by the UI
+   * to report queued work cheaply after every state change.
+   */
+  countPendingOperations(documentId: string): Promise<number> {
+    return this.database.outbox.where('documentId').equals(documentId).count();
+  }
+
   async loadPendingOperations(documentId: string): Promise<TextOperation[]> {
     const markers = await this.database.outbox.where('documentId').equals(documentId).toArray();
     const operations: TextOperation[] = [];

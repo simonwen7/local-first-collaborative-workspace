@@ -3,10 +3,12 @@ import {
   MAX_CAPABILITIES,
   MAX_CAPABILITY_LENGTH,
   MAX_CLIENT_ID_LENGTH,
+  MAX_DISPLAY_NAME_LENGTH,
   MAX_DOCUMENT_ID_LENGTH,
   MAX_ELEMENT_ID_LENGTH,
   MAX_OPERATION_ID_LENGTH,
   MAX_OPERATION_VALUE_LENGTH,
+  MAX_PRESENCE_PARTICIPANTS,
   SNAPSHOT_BOOTSTRAP_CAPABILITY,
   parseClientMessage,
   parseServerMessage,
@@ -309,15 +311,16 @@ describe('parseClientMessage', () => {
       }),
     ).not.toHaveProperty('capabilities');
 
-    expect(
-      parseClientMessage({
-        type: 'join',
-        documentId: 'local-default-document',
-        clientId: 'client-a',
-        lastServerSeq: 0,
-        capabilities: [SNAPSHOT_BOOTSTRAP_CAPABILITY],
-      }).capabilities,
-    ).toEqual([SNAPSHOT_BOOTSTRAP_CAPABILITY]);
+    const joined = parseClientMessage({
+      type: 'join',
+      documentId: 'local-default-document',
+      clientId: 'client-a',
+      lastServerSeq: 0,
+      capabilities: [SNAPSHOT_BOOTSTRAP_CAPABILITY],
+    });
+
+    expect(joined.type).toBe('join');
+    expect(joined).toHaveProperty('capabilities', [SNAPSHOT_BOOTSTRAP_CAPABILITY]);
   });
 
   it('rejects an oversized capabilities collection or capability string', () => {
@@ -458,6 +461,62 @@ describe('parseServerMessage', () => {
         type: 'unknown',
         code: 'x',
         message: 'nope',
+      }),
+    ).toThrow();
+  });
+
+  it('accepts a presence roster and an optional join display name', () => {
+    const presence = parseServerMessage({
+      type: 'presence',
+      documentId: 'local-default-document',
+      participants: [
+        { clientId: 'client-a', displayName: 'Ada', joinedAt: 1 },
+        { clientId: 'client-b', displayName: 'Guest BCDE', joinedAt: 2 },
+      ],
+    });
+
+    expect(presence.type).toBe('presence');
+    expect(presence).toHaveProperty('participants');
+
+    const joined = parseClientMessage({
+      type: 'join',
+      documentId: 'local-default-document',
+      clientId: 'client-a',
+      lastServerSeq: 0,
+      displayName: 'Ada',
+    });
+
+    expect(joined).toHaveProperty('displayName', 'Ada');
+  });
+
+  it('rejects malformed or oversized presence payloads', () => {
+    expect(() =>
+      parseServerMessage({
+        type: 'presence',
+        documentId: 'local-default-document',
+        participants: [{ clientId: 'client-a', displayName: 'Ada' }],
+      }),
+    ).toThrow();
+
+    expect(() =>
+      parseServerMessage({
+        type: 'presence',
+        documentId: 'local-default-document',
+        participants: Array.from({ length: MAX_PRESENCE_PARTICIPANTS + 1 }, (_, index) => ({
+          clientId: `client-${String(index)}`,
+          displayName: 'Guest',
+          joinedAt: index,
+        })),
+      }),
+    ).toThrow();
+
+    expect(() =>
+      parseClientMessage({
+        type: 'join',
+        documentId: 'local-default-document',
+        clientId: 'client-a',
+        lastServerSeq: 0,
+        displayName: 'x'.repeat(MAX_DISPLAY_NAME_LENGTH + 1),
       }),
     ).toThrow();
   });

@@ -7,6 +7,8 @@ export const MAX_ELEMENT_ID_LENGTH = 256;
 export const MAX_OPERATION_VALUE_LENGTH = 16384;
 export const MAX_CAPABILITY_LENGTH = 64;
 export const MAX_CAPABILITIES = 16;
+export const MAX_DISPLAY_NAME_LENGTH = 40;
+export const MAX_PRESENCE_PARTICIPANTS = 64;
 
 export const SNAPSHOT_BOOTSTRAP_CAPABILITY = 'snapshot-bootstrap-v1' as const;
 
@@ -60,6 +62,7 @@ export const joinMessageSchema = z.object({
   clientId: boundedString(MAX_CLIENT_ID_LENGTH),
   lastServerSeq: nonNegativeSafeInteger,
   capabilities: z.array(capabilitySchema).max(MAX_CAPABILITIES).optional(),
+  displayName: boundedString(MAX_DISPLAY_NAME_LENGTH).optional(),
 });
 
 export const submitOperationMessageSchema = z.object({
@@ -105,9 +108,26 @@ export const errorMessageSchema = z.object({
   message: z.string(),
 });
 
+export const presenceParticipantSchema = z.object({
+  clientId: boundedString(MAX_CLIENT_ID_LENGTH),
+  displayName: boundedString(MAX_DISPLAY_NAME_LENGTH),
+  joinedAt: nonNegativeSafeInteger,
+});
+
+/**
+ * Presence is ephemeral room state. It is never written to the operation log and
+ * never participates in CRDT convergence.
+ */
+export const presenceMessageSchema = z.object({
+  type: z.literal('presence'),
+  documentId: boundedString(MAX_DOCUMENT_ID_LENGTH),
+  participants: z.array(presenceParticipantSchema).max(MAX_PRESENCE_PARTICIPANTS),
+});
+
 export const serverMessageSchema = z.discriminatedUnion('type', [
   syncMessageSchema,
   operationMessageSchema,
+  presenceMessageSchema,
   errorMessageSchema,
 ]);
 
@@ -122,6 +142,8 @@ export type SnapshotBootstrap = z.infer<typeof snapshotBootstrapSchema>;
 export type SyncMessage = z.infer<typeof syncMessageSchema>;
 export type OperationMessage = z.infer<typeof operationMessageSchema>;
 export type ErrorMessage = z.infer<typeof errorMessageSchema>;
+export type PresenceParticipant = z.infer<typeof presenceParticipantSchema>;
+export type PresenceMessage = z.infer<typeof presenceMessageSchema>;
 export type ServerMessage = z.infer<typeof serverMessageSchema>;
 
 export function hasSnapshotBootstrapCapability(

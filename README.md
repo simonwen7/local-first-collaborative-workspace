@@ -4,9 +4,15 @@ An offline-capable collaborative plain-text workspace built around independent b
 
 [![CI](https://github.com/simonwen7/local-first-collaborative-workspace/actions/workflows/ci.yml/badge.svg)](https://github.com/simonwen7/local-first-collaborative-workspace/actions/workflows/ci.yml)
 
-![Workspace overview with sidebar, Design Notes title, Share Link, Local Saved, and Sync Online](docs/assets/workspace-overview.png)
+![Workspace overview: document sidebar, editor, and the Live Sync panel showing the pipeline from local edit through IndexedDB, outbox, WebSocket, server log, ack, and converged](docs/assets/workspace-overview.png)
 
 This is a local-first engineering project, not a hosted SaaS and not a Google Docs clone. The editor is the product surface. The synchronization engine is the core.
+
+## Why local-first
+
+Most collaborative editors treat the server as the source of truth, so losing the network means losing the document. Here the browser holds a complete, independent replica. Every keystroke is diffed into grapheme-level CRDT operations and committed to IndexedDB **before** the network is consulted. The server is a sequencing and fan-out service, not a gatekeeper.
+
+That means editing keeps working with the backend down, edits survive a reload while still offline, and replicas converge deterministically when connectivity returns — no last-writer-wins, no lost keystrokes, no merge dialog.
 
 ## Highlights
 
@@ -16,7 +22,23 @@ This is a local-first engineering project, not a hosted SaaS and not a Google Do
 - Realtime WebSocket collaboration with SQLite sequencing and idempotent retries
 - Multi-document workspace with shareable document URLs
 - Fresh-client server snapshot bootstrap (derived cache; full server history retained)
+- CRDT-anchored caret preservation so remote edits do not move your cursor
+- Ephemeral room presence, never written to the operation log
+- **Live Sync** inspector driven by real instrumentation from the persistence and sync layers
 - Single-node operational hardening plus a zero-retry Chromium reliability gate
+
+## Try it in one click
+
+Press **Launch Demo** in the top toolbar. A four-step guided tour walks through the whole local-first story without DevTools, a second browser profile, or turning off Wi-Fi:
+
+1. **Type.** The Live Sync panel lights up `LOCAL EDIT → INDEXEDDB` as operations are committed durably.
+2. **Go offline.** The WebSocket is actually suspended. Keep typing: the outbox counter climbs and the header reads `Offline — N changes safely queued locally`.
+3. **Reconnect.** The real outbox drains, the server sequence advances, and the pipeline finishes at **Converged**.
+4. **Add a demo collaborator.** A second client with its own identity and Lamport clock joins over `/sync` and types real CRDT operations into your document.
+
+![Offline mode with 21 operations queued in the durable outbox and the sync pipeline stalled at the outbox stage](docs/assets/offline-queue.png)
+
+Nothing in that panel is mocked. Each stage activates from an event emitted by the code that actually performs the work; see `apps/web/src/telemetry/sync-telemetry.ts`.
 
 ## Architecture
 
@@ -86,7 +108,9 @@ sequenceDiagram
 
 This is not compaction. Server snapshots remain O(history), are not used for behind or non-empty clients, and do not garbage-collect tombstones.
 
-## 90-second demo
+## 90-second manual demo (two real browsers)
+
+The guided demo above covers this without any setup. Do it manually when you want to prove the behaviour against genuinely separate browser storage.
 
 Use **two independent browser profiles** (or one normal window and one incognito window). Two ordinary same-origin tabs share IndexedDB and therefore **one client identity** — that is not a two-replica demo.
 
@@ -134,21 +158,41 @@ npm run test:e2e
 
 Automated evidence currently:
 
-- **Vitest:** 20 files, 151 tests, 0 skipped
-- **Playwright:** 6 specs, 7 Chromium tests, `workers = 1`, `retries = 0`
+- **Vitest:** 23 files, 182 tests, 0 skipped
+- **Playwright:** 9 specs, 13 Chromium tests, `workers = 1`, `retries = 0`
 
 Representative coverage:
 
 - CRDT convergence and property tests
 - SQLite duplicate and identity-conflict persistence
 - Offline reload plus reconnect outbox flush
+- Product-level offline toggle: queued operations drain on reconnect and survive a reload
+- Demo collaborator: a second identity's operations converge through the real server
+- Caret preservation, including mid-document typing interleaved with sender echoes
+- Ephemeral presence broadcast on join and leave, scoped per document room
 - Inactive-document outbox
 - IME document-switch regression
 - Graceful WebSocket shutdown
 - SQLite schema migration
 - 1100-operation snapshot-bootstrap browser regression (no fabricated prefix rows)
 
+Source, test, and end-to-end code are all typechecked under the same strict compiler settings (`npm run typecheck` covers `src/`, `tests/`, `bench/`, and `e2e/`).
+
 This is not complete test coverage, not formal verification, and not a Firefox/WebKit matrix.
+
+## Benchmarks
+
+`npm run bench` measures the in-memory CRDT work on the hot path. Median of 7 rounds after 2 warmup rounds, Apple M4 Pro, Node 24.13.0:
+
+| Shape      |    Ops |   Apply |   Ops/sec | Materialize | Snapshot restore |
+| ---------- | -----: | ------: | --------: | ----------: | ---------------: |
+| sequential | 50,000 | 11.8 ms | 4,233,462 |     2.99 ms |          30.8 ms |
+| concurrent | 50,000 | 11.9 ms | 4,194,895 |     4.62 ms |          41.9 ms |
+| reordered  | 50,000 | 59.1 ms |   845,522 |     2.73 ms |          29.8 ms |
+
+Out-of-order delivery is the expensive path — roughly 5x slower than in-order at 50,000 operations, because nearly every insert has to be parked in the pending-dependency buffer and drained later. No optimizations have been made against these numbers; they are a recorded baseline.
+
+Full methodology, environment, and all history sizes: [benchmarks](docs/benchmarks.md).
 
 ## Production-shaped running
 
@@ -182,6 +226,10 @@ docs/architecture Current-state design and operations notes
 - Same-origin tabs share browser identity and local state.
 - Server history is retained. Snapshot bootstrap is not compaction.
 - The operator is responsible for SQLite backup. Clients cannot rebuild a lost server.
+- Presence is in-memory per process and disappears on restart. Display names are unverified.
+- Plain text only. No rich text, comments, or version history.
+- Remote carets are not rendered. Only the local caret is preserved across remote edits.
+- Benchmarks are a single unpinned laptop run, not a CI regression gate.
 
 More operational detail: [deployment](docs/architecture/deployment.md) and [sync protocol](docs/architecture/sync-protocol.md).
 
@@ -196,6 +244,7 @@ MIT. See [LICENSE](LICENSE).
 - [Persistence model](docs/architecture/persistence-model.md)
 - [Sync protocol](docs/architecture/sync-protocol.md)
 - [Testing strategy](docs/architecture/testing-strategy.md)
+- [Benchmarks](docs/benchmarks.md)
 - [Deployment](docs/architecture/deployment.md)
 - [CHANGELOG](CHANGELOG.md)
 - [Architecture Decision Records](docs/decisions/)

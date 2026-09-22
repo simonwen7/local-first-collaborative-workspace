@@ -14,16 +14,25 @@ The server never resolves collaboration by replacing the client document with a 
 
 Client:
 
-- `join` — `{ documentId, clientId, lastServerSeq, capabilities? }`
+- `join` — `{ documentId, clientId, lastServerSeq, capabilities?, displayName? }`
 - `submit-operation` — `{ documentId, operation }`
 
 Server:
 
 - `sync` — missing document history after the client's `lastServerSeq`, through a fixed `latestServerSeq` barrier. Optional `snapshotBootstrap` is present only when the client advertised `snapshot-bootstrap-v1`, `lastServerSeq` is 0, and a valid snapshot cache is used. In that case `operations` is only the post-snapshot suffix.
 - `operation` — one sequenced live operation; this is also the durable acceptance signal
+- `presence` — `{ documentId, participants }`, the current room roster
 - `error` — protocol, validation, identity-conflict, or `sync-cursor-ahead`
 
 There is no separate ACK message. There is no protocol version field besides the optional capability string `snapshot-bootstrap-v1`. Clients that omit capabilities receive full/incremental operation history. A snapshot-capable client still accepts operations-only `sync`.
+
+## Presence
+
+Presence is ephemeral room state and is deliberately outside the durability model.
+
+The server keeps the roster in process memory, derived from the sockets currently joined to a document. It broadcasts `presence` to that room whenever a client joins or leaves. `displayName` is client-supplied and unverified; when it is absent the server derives a fallback from the client id.
+
+Presence is never written to the operation log, never participates in CRDT convergence, and does not survive a server restart. A client that closes its socket disappears from the roster; a client that goes offline via the product-level control clears its local roster to empty.
 
 ## Snapshot eligibility
 

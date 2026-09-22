@@ -1,10 +1,11 @@
 import type { TextOperation } from '@lfcw/crdt';
-import type { SequencedOperation, SnapshotBootstrap } from '@lfcw/protocol';
+import type { PresenceParticipant, SequencedOperation, SnapshotBootstrap } from '@lfcw/protocol';
 import { SNAPSHOT_BOOTSTRAP_CAPABILITY, parseServerMessage } from '@lfcw/protocol';
 import {
   InvalidSnapshotBootstrapError,
   SnapshotBootstrapIneligibleError,
 } from '../persistence/local-document-store';
+import type { SyncTelemetry } from '../telemetry/sync-telemetry';
 import { DEFAULT_DEV_SYNC_URL, resolveSyncUrl } from './sync-url';
 
 export const DEFAULT_SYNC_URL = DEFAULT_DEV_SYNC_URL;
@@ -17,6 +18,8 @@ export interface DocumentSyncClientOptions {
   readonly documentId: string;
   readonly clientId: string;
   readonly url?: string;
+  readonly displayName?: string;
+  readonly telemetry?: SyncTelemetry;
   readonly getLastServerSeq: () => Promise<number> | number;
   readonly loadPendingOperations: () => Promise<readonly TextOperation[]>;
   readonly onServerOperations: (
@@ -30,6 +33,8 @@ export interface DocumentSyncClientOptions {
     confirmedThroughServerSeq: number,
   ) => Promise<void> | void;
   readonly onStatusChange?: (status: SyncStatus) => void;
+  readonly onPresence?: (participants: readonly PresenceParticipant[]) => void;
+  readonly onServerSeqChange?: (latestServerSeq: number) => void;
 }
 
 export class DocumentSyncClient {
@@ -42,15 +47,21 @@ export class DocumentSyncClient {
   private readonly isSnapshotBootstrapEligible?: DocumentSyncClientOptions['isSnapshotBootstrapEligible'];
   private readonly onSnapshotBootstrap?: DocumentSyncClientOptions['onSnapshotBootstrap'];
   private readonly onStatusChange?: (status: SyncStatus) => void;
+  private readonly onPresence?: (participants: readonly PresenceParticipant[]) => void;
+  private readonly onServerSeqChange?: (latestServerSeq: number) => void;
+  private readonly displayName?: string;
+  private readonly telemetry?: SyncTelemetry;
 
   private socket: WebSocket | null = null;
   private status: SyncStatus = 'offline';
   private inbound: Promise<void> = Promise.resolve();
   private closedByClient = false;
+  private suspended = false;
   private catchUpComplete = false;
   private reconnectAttempt = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private snapshotBootstrapDisabled = false;
+  private lastInboundError: unknown = null;
 
   constructor(options: DocumentSyncClientOptions) {
     this.documentId = options.documentId;
@@ -71,14 +82,83 @@ export class DocumentSyncClient {
     if (options.onStatusChange !== undefined) {
       this.onStatusChange = options.onStatusChange;
     }
+
+    if (options.onPresence !== undefined) {
+      this.onPresence = options.onPresence;
+    }
+
+    if (options.onServerSeqChange !== undefined) {
+      this.onServerSeqChange = options.onServerSeqChange;
+    }
+
+    if (options.displayName !== undefined) {
+      this.displayName = options.displayName;
+    }
+
+    if (options.telemetry !== undefined) {
+      this.telemetry = options.telemetry;
+    }
   }
 
   getStatus(): SyncStatus {
     return this.status;
   }
 
+  isSuspended(): boolean {
+    return this.suspended;
+  }
+
+  /**
+   * The most recent error thrown while processing an inbound message. Exposed
+   * so callers can surface it instead of relying on an unhandled rejection.
+   */
+  getLastInboundError(): unknown {
+    return this.lastInboundError;
+  }
+
+  /**
+   * Operator-controlled offline mode. This closes the real socket and stops
+   * reconnect attempts; it does not touch local durability, so editing and
+   * IndexedDB persistence continue exactly as they do during a real network
+   * partition.
+   */
+  suspend(): void {
+    if (this.suspended) {
+      return;
+    }
+
+    this.suspended = true;
+    this.catchUpComplete = false;
+    this.cancelReconnect();
+
+    const socket = this.socket;
+    this.socket = null;
+
+    if (socket && socket.readyState !== WebSocket.CLOSED) {
+      socket.close();
+    }
+
+    this.onPresence?.([]);
+    this.setStatus('offline');
+    this.telemetry?.emit({
+      stage: 'outbox',
+      documentId: this.documentId,
+      message: 'Network suspended. Edits continue queuing locally.',
+    });
+  }
+
+  resume(): void {
+    if (!this.suspended) {
+      return;
+    }
+
+    this.suspended = false;
+    this.reconnectAttempt = 0;
+    this.connect();
+  }
+
   connect(): void {
-    if (this.closedByClient || this.socket) {
+    if (this.closedByClient || this.suspended || this.socket) {
       return;
     }
 
@@ -119,6 +199,7 @@ export class DocumentSyncClient {
 
       this.socket = null;
       this.catchUpComplete = false;
+      this.onPresence?.([]);
 
       if (this.closedByClient) {
         this.setStatus('offline');
@@ -182,17 +263,23 @@ export class DocumentSyncClient {
         clientId: this.clientId,
         lastServerSeq,
         ...(advertiseSnapshot ? { capabilities: [SNAPSHOT_BOOTSTRAP_CAPABILITY] } : {}),
+        ...(this.displayName !== undefined ? { displayName: this.displayName } : {}),
       }),
     );
   }
 
+  /**
+   * Serialize inbound message handling.
+   *
+   * Failures are recorded rather than rethrown. Rethrowing left the tail of the
+   * chain in a rejected state, and because nothing awaits that tail it surfaced
+   * as an unhandled promise rejection; the chain is also reset so a single bad
+   * message cannot poison every subsequent one.
+   */
   private enqueueInbound(work: () => Promise<void>): void {
     this.inbound = this.inbound.then(work, work).catch((error: unknown) => {
+      this.lastInboundError = error;
       this.setStatus('error');
-
-      if (error instanceof Error) {
-        throw error;
-      }
     });
   }
 
@@ -224,6 +311,11 @@ export class DocumentSyncClient {
       return;
     }
 
+    if (message.type === 'presence') {
+      this.onPresence?.(message.participants);
+      return;
+    }
+
     if (message.type === 'sync') {
       this.setStatus('syncing');
 
@@ -243,10 +335,31 @@ export class DocumentSyncClient {
 
       this.catchUpComplete = true;
       this.reconnectAttempt = 0;
+      this.onServerSeqChange?.(message.latestServerSeq);
+      this.telemetry?.emit({
+        stage: 'server-log',
+        documentId: this.documentId,
+        message:
+          message.operations.length > 0
+            ? `Caught up on ${String(message.operations.length)} server operation(s).`
+            : 'Caught up with the server log.',
+        serverSeq: message.latestServerSeq,
+      });
       await this.flushOutbox();
       await this.refreshOnlineStatus();
       return;
     }
+
+    const ownEcho = message.operation.clientId === this.clientId;
+
+    this.telemetry?.emit({
+      stage: ownEcho ? 'ack' : 'server-log',
+      documentId: this.documentId,
+      message: ownEcho
+        ? 'Server echo acknowledged a local operation.'
+        : 'Received a remote operation from the server log.',
+      serverSeq: message.serverSeq,
+    });
 
     await this.onServerOperations(
       [
@@ -257,6 +370,7 @@ export class DocumentSyncClient {
       ],
       message.serverSeq,
     );
+    this.onServerSeqChange?.(message.serverSeq);
     await this.refreshOnlineStatus();
   }
 
@@ -304,6 +418,12 @@ export class DocumentSyncClient {
       return;
     }
 
+    this.telemetry?.emit({
+      stage: 'outbox',
+      documentId: this.documentId,
+      message: `Draining ${String(pending.length)} queued operation(s) from the durable outbox.`,
+      count: pending.length,
+    });
     this.setStatus('syncing');
     this.sendOperations(pending);
   }
@@ -320,6 +440,15 @@ export class DocumentSyncClient {
     const pending = await this.loadPendingOperations();
 
     if (pending.length === 0) {
+      if (this.status !== 'online') {
+        this.telemetry?.emit({
+          stage: 'converged',
+          documentId: this.documentId,
+          message: 'Outbox empty. This replica matches the server log.',
+          count: 0,
+        });
+      }
+
       this.setStatus('online');
       return;
     }
@@ -343,10 +472,17 @@ export class DocumentSyncClient {
         }),
       );
     }
+
+    this.telemetry?.emit({
+      stage: 'websocket',
+      documentId: this.documentId,
+      message: `Submitted ${String(operations.length)} operation(s) over /sync.`,
+      count: operations.length,
+    });
   }
 
   private scheduleReconnect(): void {
-    if (this.closedByClient || this.reconnectTimer !== null || this.socket) {
+    if (this.closedByClient || this.suspended || this.reconnectTimer !== null || this.socket) {
       return;
     }
 
@@ -357,7 +493,7 @@ export class DocumentSyncClient {
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
 
-      if (this.closedByClient || this.socket) {
+      if (this.closedByClient || this.suspended || this.socket) {
         return;
       }
 

@@ -13,6 +13,8 @@ import {
   hasSnapshotBootstrapCapability,
   type ErrorMessage,
   type OperationMessage,
+  type PresenceMessage,
+  type PresenceParticipant,
   type SyncMessage,
 } from '@lfcw/protocol';
 import type { ServerConfig } from './config.js';
@@ -38,6 +40,7 @@ interface SocketSession {
   readonly connectedAt: number;
   documentId?: string;
   clientId?: string;
+  displayName?: string;
 }
 
 export interface SyncServer {
@@ -213,6 +216,7 @@ export function attachSyncServer(
           message.clientId,
           message.lastServerSeq,
           hasSnapshotBootstrapCapability(message.capabilities),
+          message.displayName,
         );
         return;
       }
@@ -260,6 +264,7 @@ export function attachSyncServer(
     clientId: string,
     lastServerSeq: number,
     snapshotCapable: boolean,
+    displayName: string | undefined,
   ) => {
     const currentLatest = store.getLatestServerSeq(documentId);
 
@@ -275,6 +280,10 @@ export function attachSyncServer(
 
     session.documentId = documentId;
     session.clientId = clientId;
+
+    if (displayName !== undefined) {
+      session.displayName = displayName;
+    }
 
     let room = rooms.get(documentId);
 
@@ -312,6 +321,61 @@ export function attachSyncServer(
       },
       'ws_sync_sent',
     );
+    broadcastPresence(documentId);
+  };
+
+  const collectPresence = (documentId: string): PresenceParticipant[] => {
+    const room = rooms.get(documentId);
+
+    if (!room) {
+      return [];
+    }
+
+    const byClientId = new Map<string, PresenceParticipant>();
+
+    for (const peer of room) {
+      const peerSession = sessions.get(peer);
+
+      if (!peerSession?.clientId) {
+        continue;
+      }
+
+      const existing = byClientId.get(peerSession.clientId);
+
+      if (existing && existing.joinedAt <= peerSession.connectedAt) {
+        continue;
+      }
+
+      byClientId.set(peerSession.clientId, {
+        clientId: peerSession.clientId,
+        displayName: peerSession.displayName ?? fallbackDisplayName(peerSession.clientId),
+        joinedAt: peerSession.connectedAt,
+      });
+    }
+
+    return [...byClientId.values()].sort((left, right) => left.joinedAt - right.joinedAt);
+  };
+
+  const broadcastPresence = (documentId: string): void => {
+    const room = rooms.get(documentId);
+
+    if (!room || room.size === 0) {
+      return;
+    }
+
+    const message: PresenceMessage = {
+      type: 'presence',
+      documentId,
+      participants: collectPresence(documentId),
+    };
+
+    for (const peer of room) {
+      const peerSession = sessions.get(peer);
+
+      if (peerSession && peer.readyState === WebSocket.OPEN) {
+        sendJson(peer, peerSession, message);
+      }
+    }
   };
 
   const acceptOperation = (socket: WebSocket, session: SocketSession, operation: TextOperation) => {
@@ -400,6 +464,10 @@ export function attachSyncServer(
     }
 
     metrics.setActiveRooms(rooms.size);
+
+    if (!closing) {
+      broadcastPresence(documentId);
+    }
   };
 
   const recordProtocolError = (
@@ -457,7 +525,7 @@ export function attachSyncServer(
   const sendJson = (
     socket: WebSocket,
     session: SocketSession,
-    message: SyncMessage | OperationMessage | ErrorMessage,
+    message: SyncMessage | OperationMessage | PresenceMessage | ErrorMessage,
   ): void => {
     if (socket.readyState !== WebSocket.OPEN) {
       return;
@@ -586,6 +654,10 @@ export function isOriginAllowed(
   }
 
   return allowedOrigins.includes(originHeader);
+}
+
+function fallbackDisplayName(clientId: string): string {
+  return `Guest ${clientId.slice(0, 4).toUpperCase()}`;
 }
 
 function rejectUpgrade(socket: Duplex, status: number, reason: string): void {

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { ROOT_ID, createInsertOperation } from '@lfcw/crdt';
-import type { ErrorMessage, OperationMessage, SyncMessage } from '@lfcw/protocol';
+import type { AnchorId } from '@lfcw/crdt';
+import type { ErrorMessage, OperationMessage, PresenceMessage, SyncMessage } from '@lfcw/protocol';
 import { SNAPSHOT_BOOTSTRAP_CAPABILITY } from '@lfcw/protocol';
 import WebSocket from 'ws';
 import { createApp } from '../src/app.js';
@@ -57,6 +58,7 @@ async function joinDocument(
   joinDocumentId = documentId,
   lastServerSeq = 0,
   capabilities?: readonly string[],
+  displayName?: string,
 ): Promise<SyncMessage> {
   const sync = waitForMessage<SyncMessage>(socket, (message) => message.type === 'sync');
 
@@ -67,6 +69,7 @@ async function joinDocument(
       clientId,
       lastServerSeq,
       ...(capabilities ? { capabilities } : {}),
+      ...(displayName !== undefined ? { displayName } : {}),
     }),
   );
 
@@ -155,6 +158,92 @@ describe('collaboration server', () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ status: 'ok' });
+  });
+
+  it('broadcasts ephemeral room presence on join and on leave', async () => {
+    running = await startServer();
+
+    const clientA = await openClient(running.port);
+    sockets.push(clientA);
+
+    const ownPresence = waitForMessage<PresenceMessage>(
+      clientA,
+      (message) => message.type === 'presence',
+    );
+    await joinDocument(clientA, 'client-a', documentId, 0, undefined, 'Ada');
+    const first = await ownPresence;
+
+    expect(first.documentId).toBe(documentId);
+    expect(first.participants).toEqual([
+      expect.objectContaining({ clientId: 'client-a', displayName: 'Ada' }),
+    ]);
+
+    const secondJoined = waitForMessage<PresenceMessage>(
+      clientA,
+      (message) => message.type === 'presence' && message.participants.length === 2,
+    );
+
+    const clientB = await openClient(running.port);
+    sockets.push(clientB);
+    await joinDocument(clientB, 'client-b', documentId, 0, undefined, 'Grace');
+
+    const roster = await secondJoined;
+    expect(roster.participants.map((participant) => participant.displayName)).toEqual([
+      'Ada',
+      'Grace',
+    ]);
+
+    const afterLeave = waitForMessage<PresenceMessage>(
+      clientA,
+      (message) => message.type === 'presence' && message.participants.length === 1,
+    );
+    await closeSocket(clientB);
+    const remaining = await afterLeave;
+
+    expect(remaining.participants).toEqual([
+      expect.objectContaining({ clientId: 'client-a', displayName: 'Ada' }),
+    ]);
+  });
+
+  it('derives a display name when a client does not supply one', async () => {
+    running = await startServer();
+
+    const clientA = await openClient(running.port);
+    sockets.push(clientA);
+
+    const presence = waitForMessage<PresenceMessage>(
+      clientA,
+      (message) => message.type === 'presence',
+    );
+    await joinDocument(clientA, 'abcdef-client');
+    const roster = await presence;
+
+    expect(roster.participants[0]?.displayName).toBe('Guest ABCD');
+  });
+
+  it('scopes presence to a document room', async () => {
+    running = await startServer();
+
+    const clientA = await openClient(running.port);
+    const clientB = await openClient(running.port);
+    sockets.push(clientA, clientB);
+
+    const presenceA = waitForMessage<PresenceMessage>(
+      clientA,
+      (message) => message.type === 'presence',
+    );
+    await joinDocument(clientA, 'client-a', documentId, 0, undefined, 'Ada');
+    await presenceA;
+
+    const presenceB = waitForMessage<PresenceMessage>(
+      clientB,
+      (message) => message.type === 'presence',
+    );
+    await joinDocument(clientB, 'client-b', 'other-document', 0, undefined, 'Grace');
+    const rosterB = await presenceB;
+
+    expect(rosterB.documentId).toBe('other-document');
+    expect(rosterB.participants).toHaveLength(1);
   });
 
   it('joins, broadcasts an accepted insert, persists it, and replays it to a later client', async () => {
@@ -447,7 +536,9 @@ describe('collaboration server', () => {
     ]);
     expect(sync.snapshotBootstrap?.snapshotSeq).toBe(SNAPSHOT_OPERATION_THRESHOLD);
     expect(sync.operations).toHaveLength(1);
-    expect(sync.operations[0]?.operation.value).toBe('z');
+    const suffix = sync.operations[0]?.operation;
+    expect(suffix?.kind).toBe('insert');
+    expect(suffix).toHaveProperty('value', 'z');
     expect(sync.latestServerSeq).toBe(running.created.store.getLatestServerSeq(documentId));
   });
 
@@ -483,7 +574,7 @@ describe('collaboration server', () => {
 });
 
 function seedResolvedHistory(store: OperationStore, seedDocumentId: string, count: number) {
-  let afterId = ROOT_ID;
+  let afterId: AnchorId = ROOT_ID;
   let last = createInsertOperation({
     clientId: 'seed',
     counter: 1,

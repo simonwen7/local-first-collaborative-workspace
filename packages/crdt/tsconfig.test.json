@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "rootDir": ".",
+    "outDir": null,
+    // Only the test/bench harnesses touch Node globals. tsconfig.json still
+    // builds src/ without them, so the package stays runtime-neutral.
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts", "bench/**/*.ts"]
+}
