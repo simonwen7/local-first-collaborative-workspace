@@ -40,6 +40,5 @@ COPY --from=build /app/apps/server/package.json ./apps/server/package.json
 COPY --from=build /app/apps/server/dist ./apps/server/dist
 
 EXPOSE 3001
-VOLUME ["/data"]
 
 CMD ["node", "apps/server/dist/index.js"]
